@@ -1,0 +1,4 @@
+python3 tools/demo_track.py --demo_type video -f exps/example/mot/yolox_dancetrack_test.py -c pretrained/ocsort_dance_model.pth.tar --path videos/dance_demo.mp4 --fp16 --fuse --save_result --out_path demo_out.mp4
+python3 tools/demo_track.py --demo_type video -f exps/example/mot/yolox_dancetrack_test.py -c pretrained/ocsort_dance_model.pth.tar --path videos/chicken.mp4 --fp16 --fuse --save_result --out_path chicken_out.mp4
+python3 tools/demo_track.py --demo_type image -f exps/example/mot/yolox_s_mix_det.py -c pretrained/yolox_s.pth --path imgs/uav0000306_00230_v --fp16 --fuse --save_result --out_path output_folder_for_results
+python3 tools/demo_track.py --demo_type image -f exps/example/mot/yolox_m_mix_det.py -c pretrained/yolox_m.pth --path imgs/screen-20250422-150828_seg_1 --fp16 --fuse --save_result --out_path output_folder_for_results

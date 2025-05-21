@@ -1,0 +1,49 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Run OC-SORT Video Demo",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/demo_track.py",
+            "console": "integratedTerminal",
+            "args": [
+              "--demo_type", "video",
+              "-f", "exps/example/mot/yolox_dancetrack_test.py",
+              "-c", "pretrained/ocsort_dance_model.pth.tar",
+              "--path", "videos/chicken.mp4",
+              "--fp16",
+              "--fuse",
+              "--save_result",
+              "--out_path", "chicken_out.mp4"
+            ]
+        },
+        {
+            "name": "Run OC-SORT Images Demo",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/demo_track.py",
+            "console": "integratedTerminal",
+            "args": [
+              "--demo_type", "image",
+              "-f", "exps/example/mot/yolox_m_mix_det.py",
+              "-c", "pretrained/yolox_m.pth",
+              "--path", "imgs/uav0000306_00230_v",
+              "--track_thresh", "0.7",
+              "--fp16",
+              "--fuse",
+              "--save_result"
+            ]
+        },
+    ]
+}
