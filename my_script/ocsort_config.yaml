@@ -1,0 +1,19 @@
+OCSort:
+  det_thresh: 0.7
+  max_age: 120
+  min_hits: 3 
+  iou_threshold: 0.3
+  delta_t: 3
+  inertia: 0.2 
+  use_byte: True
+  low_det_thresh: 0.2
+  max_track_num: 60
+
+YOLO:
+  onnx_path: "pretrained/yolov8n_visdrone_2.onnx"
+  conf_threshold: 0.25
+  nms_threshold: 0.7
+  
+EXP:
+  img_foler: "imgs/occlusion_issue_seg_1"
+  resize_ratio: 0.5

@@ -1,8 +1,13 @@
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+
+
+
 # from kalmanfilterbox import KalmanFilterBoxTracker
-from kalmanfilterboxnomatrix import KalmanFilterBoxTrackerNoMatrix as KalmanFilterBoxTracker
+# from kalmanfilterboxnomatrix import KalmanFilterBoxTrackerNoMatrix as KalmanFilterBoxTracker
+from kalmanfilterboxnomatrix_new import KalmanFilterBoxTrackerNoMatrix as KalmanFilterBoxTracker
+
 
 USE_MY_HUNGARIAN = True
 if USE_MY_HUNGARIAN:
@@ -174,6 +179,8 @@ class OCSort(object):
             If True, use BYTE-style secondary matching with low-confidence detections. Default: False.
         low_det_thresh(float):
             low score thresh used in BYTE-style secondary matching. Default: 0.2.
+        v_inertia(float):
+            to prevent speed estimation noise by partial detection, use EMA to update vx, vy and vs. Default: 0.0
 
     Attributes:
         trackers (List[KalmanBoxTracker]): 
@@ -183,7 +190,7 @@ class OCSort(object):
     """
     
     def __init__(self, det_thresh=0.7, max_age=60, min_hits=3, 
-        iou_threshold=0.3, delta_t=3, inertia=0.2, use_byte=True, low_det_thresh=0.2):
+        iou_threshold=0.3, delta_t=3, inertia=0.2, use_byte=True, low_det_thresh=0.2, max_track_num=40, **kwargs):
         """
         Sets key parameters for SORT
         """
@@ -198,6 +205,7 @@ class OCSort(object):
         self.inertia = inertia
         self.use_byte = use_byte
         self.low_det_thresh = low_det_thresh
+        self.max_track_num = max_track_num
         KalmanFilterBoxTracker.count = 0
 
     def update(self, yolo_dets, debug_mode=False):
@@ -212,7 +220,8 @@ class OCSort(object):
         if debug_mode:
             debug_info = {
                 "predict_bbox": [],  # (#trks, 5), cx, cy, w, h, id
-                "v_directions": [],  # (#trks, 5), cx, cy, vx, vy, id
+                "v_directions": [],  # (#trks, 5), cx, cy, vx(normalized), vy(normalized), id
+                "v_kalmanfilter": [],  # (trks, 5), cx, cy, vx, vy, id
                 "last_observed_zs": [],  # (#trks, 5), cx, cy, w, h, id
                 "previous_obs": [],  # (#trks, 3), cx, cy, id
                 "first_round_assign": [],  # (#num, 5), cx, cy, w, h, id
@@ -225,9 +234,9 @@ class OCSort(object):
 
         if yolo_dets is None or len(yolo_dets) == 0:  # (#det, 6)
             if debug_mode:
-                return np.empty((0, 6)), debug_info
+                return np.empty((0, 5)), np.empty((0, 5)), debug_info
             else:
-                return np.empty((0, 6))
+                return np.empty((0, 5)), np.empty((0, 5))
         
         # filter detections by score
         scores = yolo_dets[:, 4]  # (#det)
@@ -286,11 +295,20 @@ class OCSort(object):
                 id = self.trackers[i].id
                 debug_info["previous_obs"].append(np.array([cx, cy, id], dtype=np.float32))
 
+        if debug_mode:
+            for i in range(len(self.trackers)):
+                cx = self.trackers[i].x[0, 0]
+                cy = self.trackers[i].x[1, 0]
+                vx_kf = self.trackers[i].x[4, 0]
+                vy_kf = self.trackers[i].x[5, 0]
+                id = self.trackers[i].id
+                debug_info["v_kalmanfilter"].append(np.array([cx, cy, vx_kf, vy_kf, id], dtype=np.float32))
+
         # first round of ocsort (OCM): iou + v (trackers + high score detections)
         matched, unmatched_dets, unmatched_trks = oc_associate(
             dets_high, trks, self.iou_threshold, v_directions, previous_obs, 
             valid_mask, self.inertia)
-        for det_idx, trk_idx in matched:  # update trackers by matched detection immediately
+        for det_idx, trk_idx in matched:   # update trackers by matched detection immediately
             self.trackers[trk_idx].update(dets_high[det_idx, :4])
 
             if debug_mode:
@@ -298,9 +316,6 @@ class OCSort(object):
                 id = self.trackers[trk_idx].id
                 debug_info["first_round_assign"].append(np.array([cx, cy, w, h, id], 
                                                    dtype=np.float32))
-
-                
-
         
         # second round of bytetrack: iou (optional: left trackers + mid score detections)
         if self.use_byte and len(dets_second) > 0 and unmatched_trks.shape[0] > 0:
@@ -324,8 +339,6 @@ class OCSort(object):
                                                    dtype=np.float32))
 
             unmatched_trks = np.setdiff1d(unmatched_trks, np.array(to_remove_trk_idx))
-
-
 
         # third round of ocsort(OCR): iou (last observation of left trackers + left high score detections)
         if unmatched_dets.shape[0] > 0 and unmatched_trks.shape[0] > 0:
@@ -356,20 +369,13 @@ class OCSort(object):
         for trk_idx in unmatched_trks:
             self.trackers[trk_idx].update(None)  # update unmatched trackers by None(no measurement)
         
-        # create new trackers for unmatched high score detections
-        for det_idx in unmatched_dets:
-            cx, cy, w, h = dets_high[det_idx, :4]
-            self.trackers.append(KalmanFilterBoxTracker(cx, cy, w, h, self.delta_t))
-            if debug_mode:
-                cx, cy, w, h = dets_high[det_idx, :4]
-                id = self.trackers[-1].id
-                debug_info["newly_created"].append(np.array([cx, cy, w, h, id], 
-                                                   dtype=np.float32))
+        
 
 
         # manage tracker:
         # remove dead tracker
-        ret = []
+        ret_detected = []
+        ret_undetected = []
         num_trackers = len(self.trackers)
         for i in range(num_trackers):
             trk_idx = num_trackers - 1 - i  # loop backwards
@@ -385,43 +391,83 @@ class OCSort(object):
             
             # return consecutive detected trackers
             if trk_obj.consecutive_hits >= self.min_hits:
-                ret.append(trk_obj.get_state_with_id())
+                ret_detected.append(trk_obj.get_state_with_id())
                 continue
 
             # return detected trackers if frame count is not enough
             if trk_obj.consecutive_missed_frames == 0 and self.frame_count <= self.min_hits:
-                ret.append(trk_obj.get_state_with_id())
+                ret_detected.append(trk_obj.get_state_with_id())
+
+            # return undetected trackers
+            if trk_obj.consecutive_missed_frames >= 1:
+                ret_undetected.append(trk_obj.get_state_with_id())
         
-        if len(ret):
-            ret = np.array(ret, dtype=np.float32)
+        if len(ret_detected):
+            ret_detected = np.array(ret_detected, dtype=np.float32)
         else:
-            ret = np.empty((0, 5), dtype=np.float32)
+            ret_detected = np.empty((0, 5), dtype=np.float32)
+
+        if len(ret_undetected):
+            ret_undetected = np.array(ret_undetected, dtype=np.float32)
+        else:
+            ret_undetected = np.empty((0, 5), dtype=np.float32)
+
+        
+        # create new trackers for unmatched high score detections
+        for det_idx in unmatched_dets:
+            cx, cy, w, h = dets_high[det_idx, :4]
+            if len(self.trackers) > self.max_track_num:  # prevent too many trackers
+                continue
+            self.trackers.append(KalmanFilterBoxTracker(cx, cy, w, h, self.delta_t))
+            if debug_mode:
+                cx, cy, w, h = dets_high[det_idx, :4]
+                id = self.trackers[-1].id
+                debug_info["newly_created"].append(np.array([cx, cy, w, h, id], 
+                                                   dtype=np.float32))
         
         if debug_mode:
-            return ret, debug_info
+            return ret_detected, ret_undetected, debug_info
         else:
-            return ret
+            return ret_detected, ret_undetected
 
 if __name__ == "__main__":
     from pathlib import Path
     import shutil
 
     import cv2
+    import yaml
 
     from inference_onnx import YoloPredictor
 
+    CONFIG_FILE = './my_script/ocsort_config.yaml'
+    with open(CONFIG_FILE, 'r') as file:
+        config = yaml.safe_load(file)
 
-    def get_color(idx):
+
+    # def get_color(idx):
+        # idx = idx * 3
+        # color = ((37 * idx) % 255, (17 * idx) % 255, (29 * idx) % 255)
+        # return color
+    
+    def get_color(idx, less_saturate=False):
         idx = idx * 3
         color = ((37 * idx) % 255, (17 * idx) % 255, (29 * idx) % 255)
+        
+        if less_saturate:
+            # Blend color toward gray (128, 128, 128) to reduce saturation
+            gray = 128
+            blend_ratio = 0.5  # Adjust this ratio to control how much desaturation is applied
+            color = tuple(int(c * (1 - blend_ratio) + gray * blend_ratio) for c in color)
+        
         return color
 
 
     # load model
-    predictor = YoloPredictor()
+    predictor = YoloPredictor(**config["YOLO"])
 
     # load imgs
-    img_foler = Path("imgs/uav0000306_00230_v")
+    # img_foler = Path("imgs/frame_yuv")
+    img_foler = Path(config["EXP"]["img_foler"])
     img_paths = list(img_foler.glob("*"))
     img_paths = sorted(img_paths)
 
@@ -447,37 +493,44 @@ if __name__ == "__main__":
 
 
     # load tracker
-    tracker = OCSort(min_hits=1)
+    tracker = OCSort(**config["OCSort"])
 
     np.set_printoptions(suppress=True, precision=3, linewidth=150)
-
+    resize_ratio = config["EXP"]["resize_ratio"]
+    num_images = len(img_paths)
+    print(f"images num: {num_images}")
     for i, img_path in enumerate(img_paths):
-        print(f"processing {i}-img...")
+        print(f"processing {i+1}/{num_images} img...")
         img = cv2.imread(img_path)
+        if resize_ratio < 0.9:
+            img = cv2.resize(img, dsize=(0, 0), fx=resize_ratio, fy=resize_ratio)
+
         # detect
         results = predictor.predict(img)
+        
+        # track
+        debug_mode = True
+        if debug_mode:
+            online_targets, offline_targets, debug_info = tracker.update(results, debug_mode)
+        else:
+            online_targets, offline_targets = tracker.update(results, debug_mode)
+
+        # draw tracker result
+        img_vis_trk = img.copy()
+
         # draw detect result
-        img_vis_det = img.copy()
         for cx, cy, w, h, score in results:
             x1 = int(cx - 0.5 * w)
             y1 = int(cy - 0.5 * h)
             x2 = int(cx + 0.5 * w)
             y2 = int(cy + 0.5 * h)
-            cv2.rectangle(img_vis_det, (x1, y1), (x2, y2), 
-                          (0,0,255), 2)
+            cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), 
+                        (0,0,255), 2)
             label = f" {score:.2f}"
-            cv2.putText(img_vis_det, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
-                        0.5, (0,0,255), 1)
-        cv2.imwrite(det_save_folder / img_path.name, img_vis_det)
-        
-        # track
-        debug_mode = False
-        if debug_mode:
-            online_targets, debug_info = tracker.update(results, debug_mode)
-        else:
-            online_targets = tracker.update(results, debug_mode)
-        # draw tracker result
-        img_vis_trk = img.copy()
+            cv2.putText(img_vis_trk, label, (x2 - 40, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
+                        0.5, (0,0,255), 2)
+
+        # draw online trackers
         for cx, cy, w, h, id in online_targets:
             x1 = int(cx - 0.5 * w)
             y1 = int(cy - 0.5 * h)
@@ -489,7 +542,66 @@ if __name__ == "__main__":
             label = f"ID:{id}"
             cv2.putText(img_vis_trk, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                         0.5, color, 2)
+            
+        # draw temporary offline trackers
+        offline_ids = set()
+        for cx, cy, w, h, id in offline_targets:
+            x1 = int(cx - 0.5 * w)
+            y1 = int(cy - 0.5 * h)
+            x2 = int(cx + 0.5 * w)
+            y2 = int(cy + 0.5 * h)
+            id = int(id)
+            offline_ids.add(id)
+            color = get_color(id, True)
+            cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
+            label = f"ID:{id}"
+            cv2.putText(img_vis_trk, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
+                        0.5, color, 2)
+            
+        # draw detect result
+        img_vis_det = img.copy()
+        for cx, cy, w, h, score in results:
+            x1 = int(cx - 0.5 * w)
+            y1 = int(cy - 0.5 * h)
+            x2 = int(cx + 0.5 * w)
+            y2 = int(cy + 0.5 * h)
+            cv2.rectangle(img_vis_det, (x1, y1), (x2, y2), 
+                        (0,0,255), 2)
+            label = f" {score:.2f}"
+            cv2.putText(img_vis_det, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
+                        0.5, (0,0,255), 1)
+        cv2.imwrite(det_save_folder / img_path.name, img_vis_det)
+            
+        if debug_mode:
+            scale = 50
+            for cx, cy, vx, vy, id in debug_info["v_kalmanfilter"]:
+                cx = int(cx)
+                cy = int(cy)
+                id = int(id)
+                offline = id in offline_ids
+                color = get_color(id, offline)
+
+                
+
+                end_x = int(cx + scale * vx)
+                end_y = int(cy + scale * vy)
+                cv2.arrowedLine(img_vis_trk, (cx, cy), (end_x, end_y), 
+                                color=color, thickness=2, tipLength=0.3)
+                
+                # Calculate the velocity magnitude
+                magnitude = (vx**2 + vy**2)**0.5
+                magnitude_label = f"{magnitude:.2f}"
+
+                # Draw the magnitude label just below the center point
+                text_x = cx
+                text_y = cy + 15  # shift downward; adjust value as needed
+                cv2.putText(img_vis_trk, magnitude_label, (text_x, text_y),
+                            fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                            fontScale=0.5, color=color, thickness=2, lineType=cv2.LINE_AA)
+            
         cv2.imwrite(trk_save_folder / img_path.name, img_vis_trk)
+
+        
         
         if debug_mode:
             # draw predictions
@@ -519,7 +631,7 @@ if __name__ == "__main__":
                 color = get_color(id)
                 cv2.arrowedLine(img_vis_vdir, (cx, cy), (end_x, end_y), 
                                 color=color, thickness=2, tipLength=0.3)
-            debug_vdir_save_folder
+            
             cv2.imwrite(debug_vdir_save_folder / img_path.name, img_vis_vdir)
 
             # draw last observed_zs

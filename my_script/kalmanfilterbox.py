@@ -68,7 +68,7 @@ class KalmanFilterBoxTracker():
         self.last_z_buffer = deque(maxlen=delta_t)  # hold last "delta_t+1" observations
         self.v_direction = np.array([0, 0], dtype=np.float32)  # velocity direction estimated by observations
 
-        self.id = KalmanFilterBoxTracker.count
+        self.id = KalmanFilterBoxTracker.count + 1  # start from 1 
         KalmanFilterBoxTracker.count += 1
 
     def predict(self, is_virtual=False):

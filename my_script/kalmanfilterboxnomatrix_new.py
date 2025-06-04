@@ -14,6 +14,13 @@ class KalmanFilterBoxTrackerNoMatrix():
 
         s = w * h
         r = w / (h + 1e-6)
+
+        # stable shape(EMA)
+        self.canonical_s = s
+        self.canonical_r = r
+        self.shape_diff_thresh = 0.2
+        self.shape_update_coeff = 0.9
+        self.is_deviated = False
     
         # state (mean)
         self.x = np.array([[cx], [cy], [s], [r], [0], [0], [0]], dtype=np.float32)
@@ -202,6 +209,15 @@ class KalmanFilterBoxTrackerNoMatrix():
             self.last_observed_z = z
             self.last_z_buffer.append(z)  # update last z buffer
 
+        # check if z deviates from canonical shape
+        self.is_deviated = False
+        if not is_virtual:
+            s = z[2, 0]
+            r = z[3, 0]
+            self.is_deviated = self._is_shape_deviated(s, r)
+            self._update_canonical_shape(s, r)
+
+
         # normal correct(update) phase
         Q = self.Q
         x = self.x
@@ -221,10 +237,15 @@ class KalmanFilterBoxTrackerNoMatrix():
         for i in range(3):  # cov_x_vx, cov_y_vy, cov_s_vs
             self.P_post[i,i+4] = Q[i,i]*P[i,i+4] / (P[i,i]+Q[i,i]) 
             self.P_post[i+4,i] = self.P_post[i,i+4]
-        
 
+        # only update position not velocity if shape is deviated(e.g. partial detection due to occlusion)
+        if self.is_deviated:
+            for i in range(0, 3):  # vx, vy, vs
+                self.x_post[i+4,0] = self.x[i+4,0]
+        
         self.x = self.x_post.copy()
         self.P = self.P_post.copy()
+
 
         ret_state = self._cxcysr2cxcywh(self.x[:4].flatten())
 
@@ -251,6 +272,29 @@ class KalmanFilterBoxTrackerNoMatrix():
         h = s / (w + 1e-6)
         cxcywh = np.array([cx, cy, w, h], dtype=np.float32).reshape(shape)
         return cxcywh
+    
+    def _is_shape_deviated(self, s, r):
+        canonical_w = np.sqrt(self.canonical_s * self.canonical_r)
+        canonical_h = self.canonical_s / (canonical_w + 1e-6)
+        # print(f"s: {s}, r: {r}")
+        w = np.sqrt(s * r)
+        h = s / (w + 1e-6)
+        w_diff = (canonical_w - w) / (canonical_w + 1e-6)
+        h_diff = (canonical_h - h) / (canonical_h + 1e-6)
+        shape_diff = max(w_diff, h_diff)
+
+        # if s_diff > self.s_diff_thresh or r_diff > self.r_diff_thresh:
+        # return False
+        if shape_diff > self.shape_diff_thresh:
+            return True
+        else:
+            return False
+
+        
+    def _update_canonical_shape(self, s, r):
+        self.canonical_s = self.canonical_s * self.shape_update_coeff + s * (1 - self.shape_update_coeff)
+        self.canonical_r = self.canonical_r * self.shape_update_coeff + r * (1 - self.shape_update_coeff)
+
     
 
 if __name__ == "__main__":
