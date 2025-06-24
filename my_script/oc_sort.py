@@ -1,7 +1,7 @@
+from dataclasses import dataclass
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-
-
 
 
 # from kalmanfilterbox import KalmanFilterBoxTracker
@@ -146,6 +146,20 @@ def oc_associate(detections, trackers, iou_threshold, velocities, previous_obs, 
     return matches, np.array(unmatched_detections), np.array(unmatched_trackers)
 
 
+@dataclass
+class Track:
+    cx: float
+    cy: float
+    w: float
+    h: float
+    id: int
+    detected: bool
+    vx: float
+    vy: float
+    occluded: bool
+    canonical_s: float
+    canonical_r: float
+
 
 
 class OCSort(object):
@@ -232,12 +246,14 @@ class OCSort(object):
             }
         self.frame_count += 1
 
-        if yolo_dets is None or len(yolo_dets) == 0:  # (#det, 6)
-            if debug_mode:
-                return np.empty((0, 5)), np.empty((0, 5)), debug_info
-            else:
-                return np.empty((0, 5)), np.empty((0, 5))
-        
+        if yolo_dets is None or len(yolo_dets) == 0:  # (#det, 5)
+            yolo_dets = yolo_dets.reshape(-1, 5)  # (0, 5)
+            
+            # if debug_mode:
+            #     return self._return_trackers(), debug_info
+            # else:
+            #     return self._return_trackers()
+            
         # filter detections by score
         scores = yolo_dets[:, 4]  # (#det)
         high_conf_mask = scores > self.det_thresh
@@ -370,12 +386,7 @@ class OCSort(object):
             self.trackers[trk_idx].update(None)  # update unmatched trackers by None(no measurement)
         
         
-
-
-        # manage tracker:
-        # remove dead tracker
-        ret_detected = []
-        ret_undetected = []
+        # manage trackers
         num_trackers = len(self.trackers)
         for i in range(num_trackers):
             trk_idx = num_trackers - 1 - i  # loop backwards
@@ -388,30 +399,6 @@ class OCSort(object):
                     debug_info["newly_deleted"].append(np.array([cx, cy, w, h, id], 
                                                    dtype=np.float32))
                 continue
-            
-            # return consecutive detected trackers
-            if trk_obj.consecutive_hits >= self.min_hits:
-                ret_detected.append(trk_obj.get_state_with_id())
-                continue
-
-            # return detected trackers if frame count is not enough
-            if trk_obj.consecutive_missed_frames == 0 and self.frame_count <= self.min_hits:
-                ret_detected.append(trk_obj.get_state_with_id())
-
-            # return undetected trackers
-            if trk_obj.consecutive_missed_frames >= 1:
-                ret_undetected.append(trk_obj.get_state_with_id())
-        
-        if len(ret_detected):
-            ret_detected = np.array(ret_detected, dtype=np.float32)
-        else:
-            ret_detected = np.empty((0, 5), dtype=np.float32)
-
-        if len(ret_undetected):
-            ret_undetected = np.array(ret_undetected, dtype=np.float32)
-        else:
-            ret_undetected = np.empty((0, 5), dtype=np.float32)
-
         
         # create new trackers for unmatched high score detections
         for det_idx in unmatched_dets:
@@ -425,10 +412,26 @@ class OCSort(object):
                 debug_info["newly_created"].append(np.array([cx, cy, w, h, id], 
                                                    dtype=np.float32))
         
+
         if debug_mode:
-            return ret_detected, ret_undetected, debug_info
+            return self._return_trackers(), debug_info
         else:
-            return ret_detected, ret_undetected
+            return self._return_trackers()
+        
+    def _return_trackers(self):
+        rtn_trackers = []
+        for trk_obj in self.trackers:
+            cx, cy, w, h, id = trk_obj.get_state_with_id()
+            id = int(id)
+            detected = trk_obj.consecutive_missed_frames == 0
+            vx, vy = trk_obj.x.flatten()[4:6]
+            is_occluded  = trk_obj.is_occluded
+            canonical_s = trk_obj.canonical_s
+            canonical_r = trk_obj.canonical_r
+            rtn_tracker = Track(cx, cy, w, h, id, detected, vx, vy, is_occluded, canonical_s, canonical_r)
+            rtn_trackers.append(rtn_tracker)
+        return rtn_trackers
+
 
 if __name__ == "__main__":
     from pathlib import Path
@@ -506,61 +509,67 @@ if __name__ == "__main__":
             img = cv2.resize(img, dsize=(0, 0), fx=resize_ratio, fy=resize_ratio)
 
         # detect
-        results = predictor.predict(img)
+        detect_results = predictor.predict(img)
         
         # track
         debug_mode = True
         if debug_mode:
-            online_targets, offline_targets, debug_info = tracker.update(results, debug_mode)
+            rtn_tracks, debug_info = tracker.update(detect_results, debug_mode)
         else:
-            online_targets, offline_targets = tracker.update(results, debug_mode)
+            rtn_tracks = tracker.update(detect_results, debug_mode)
 
         # draw tracker result
         img_vis_trk = img.copy()
 
         # draw detect result
-        for cx, cy, w, h, score in results:
+        for cx, cy, w, h, score in detect_results:
             x1 = int(cx - 0.5 * w)
             y1 = int(cy - 0.5 * h)
-            x2 = int(cx + 0.5 * w)
-            y2 = int(cy + 0.5 * h)
-            cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), 
-                        (0,0,255), 2)
-            label = f" {score:.2f}"
-            cv2.putText(img_vis_trk, label, (x2 - 40, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
-                        0.5, (0,0,255), 2)
 
-        # draw online trackers
-        for cx, cy, w, h, id in online_targets:
-            x1 = int(cx - 0.5 * w)
-            y1 = int(cy - 0.5 * h)
-            x2 = int(cx + 0.5 * w)
-            y2 = int(cy + 0.5 * h)
-            id = int(id)
-            color = get_color(id)
+
+        # draw trackers
+        for trk in rtn_tracks:
+            x1 = int(trk.cx - 0.5 * trk.w)
+            y1 = int(trk.cy - 0.5 * trk.h)
+            x2 = int(trk.cx + 0.5 * trk.w)
+            y2 = int(trk.cy + 0.5 * trk.h)
+            less_saturate = not trk.detected
+            color = get_color(trk.id, less_saturate)
             cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
-            label = f"ID:{id}"
+            label = f"ID:{trk.id}"
             cv2.putText(img_vis_trk, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                         0.5, color, 2)
+        # # draw online trackers
+        # for cx, cy, w, h, id in online_targets:
+        #     x1 = int(cx - 0.5 * w)
+        #     y1 = int(cy - 0.5 * h)
+        #     x2 = int(cx + 0.5 * w)
+        #     y2 = int(cy + 0.5 * h)
+        #     id = int(id)
+        #     color = get_color(id)
+        #     cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
+        #     label = f"ID:{id}"
+        #     cv2.putText(img_vis_trk, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
+        #                 0.5, color, 2)
             
-        # draw temporary offline trackers
-        offline_ids = set()
-        for cx, cy, w, h, id in offline_targets:
-            x1 = int(cx - 0.5 * w)
-            y1 = int(cy - 0.5 * h)
-            x2 = int(cx + 0.5 * w)
-            y2 = int(cy + 0.5 * h)
-            id = int(id)
-            offline_ids.add(id)
-            color = get_color(id, True)
-            cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
-            label = f"ID:{id}"
-            cv2.putText(img_vis_trk, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
-                        0.5, color, 2)
+        # # draw temporary offline trackers
+        # offline_ids = set()
+        # for cx, cy, w, h, id in offline_targets:
+        #     x1 = int(cx - 0.5 * w)
+        #     y1 = int(cy - 0.5 * h)
+        #     x2 = int(cx + 0.5 * w)
+        #     y2 = int(cy + 0.5 * h)
+        #     id = int(id)
+        #     offline_ids.add(id)
+        #     color = get_color(id, True)
+        #     cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
+        #     label = f"ID:{id}"
+        #     cv2.putText(img_vis_trk, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
+        #                 0.5, color, 2)
             
         # draw detect result
         img_vis_det = img.copy()
-        for cx, cy, w, h, score in results:
+        for cx, cy, w, h, score in detect_results:
             x1 = int(cx - 0.5 * w)
             y1 = int(cy - 0.5 * h)
             x2 = int(cx + 0.5 * w)

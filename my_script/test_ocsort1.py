@@ -64,26 +64,29 @@ resize_ratio = config["EXP"]["resize_ratio"]
 num_images = len(img_paths)
 print(f"images num: {num_images}")
 for i, img_path in enumerate(img_paths):
+
+    # if i+1 == 56:
+    #     print("done")
     print(f"processing {i+1}/{num_images} img...")
     img = cv2.imread(img_path)
     if resize_ratio < 0.9 or resize_ratio > 1.1:
         img = cv2.resize(img, dsize=(0, 0), fx=resize_ratio, fy=resize_ratio)
 
     # detect
-    results = predictor.predict(img)
+    det_results = predictor.predict(img)
     
     # track
     debug_mode = True
     if debug_mode:
-        online_targets, offline_targets, debug_info = tracker.update(results, debug_mode)
+        rtn_tracks, debug_info = tracker.update(det_results, debug_mode)
     else:
-        online_targets, offline_targets = tracker.update(results, debug_mode)
+        rtn_tracks = tracker.update(det_results, debug_mode)
 
     # draw tracker result
     img_vis_trk = img.copy()
 
     # draw detect result
-    for cx, cy, w, h, score in results:
+    for cx, cy, w, h, score in det_results:
         x1 = int(cx - 0.5 * w)
         y1 = int(cy - 0.5 * h)
         x2 = int(cx + 0.5 * w)
@@ -94,73 +97,55 @@ for i, img_path in enumerate(img_paths):
         cv2.putText(img_vis_trk, label, (x2 - 40, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                     0.5, (0,0,255), 2)
 
-    # draw online trackers
-    for cx, cy, w, h, id in online_targets:
-        x1 = int(cx - 0.5 * w)
-        y1 = int(cy - 0.5 * h)
-        x2 = int(cx + 0.5 * w)
-        y2 = int(cy + 0.5 * h)
-        id = int(id)
-        color = get_color(id)
+    # draw trackers
+    scale = 20
+    for trk in rtn_tracks:
+        if trk.id == 4:
+            continue
+        x1 = int(trk.cx - 0.5 * trk.w)
+        y1 = int(trk.cy - 0.5 * trk.h)
+        x2 = int(trk.cx + 0.5 * trk.w)
+        y2 = int(trk.cy + 0.5 * trk.h)
+        id = int(trk.id)
+        less_saturate = not trk.detected
+        color = get_color(id, less_saturate)
         cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
         label = f"ID:{id}"
         cv2.putText(img_vis_trk, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                     0.5, color, 2)
         
-    # draw temporary offline trackers
-    offline_ids = set()
-    for cx, cy, w, h, id in offline_targets:
-        x1 = int(cx - 0.5 * w)
-        y1 = int(cy - 0.5 * h)
-        x2 = int(cx + 0.5 * w)
-        y2 = int(cy + 0.5 * h)
-        id = int(id)
-        offline_ids.add(id)
-        color = get_color(id, True)
+        # draw velocity
+        cx = int(trk.cx)
+        cy = int(trk.cy)
+        end_x = int(trk.cx + scale * trk.vx)
+        end_y = int(trk.cy + scale * trk.vy)
+        cv2.arrowedLine(img_vis_trk, (cx, cy), (end_x, end_y), 
+                        color=color, thickness=2, tipLength=0.3)
+        
+        # Calculate the velocity magnitude
+        magnitude = (trk.vx**2 + trk.vy**2)**0.5
+        magnitude_label = f"{magnitude:.2f}"
+
+        text_x = cx
+        text_y = cy + 15  # shift downward; adjust value as needed
+        cv2.putText(img_vis_trk, magnitude_label, (text_x, text_y),
+                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                    fontScale=0.5, color=color, thickness=2, lineType=cv2.LINE_AA)
+        
+        # draw occlusion info
+        occluded = trk.occluded
+        canonical_s = trk.canonical_s
+        canonical_r = trk.canonical_r
+        canonical_w = np.sqrt(canonical_s * canonical_r)
+        canonical_h = canonical_s / (canonical_w + 1e-6)
+        x1 = int(trk.cx - 0.5 * canonical_w)
+        y1 = int(trk.cy - 0.5 * canonical_h)
+        x2 = int(trk.cx + 0.5 * canonical_w)
+        y2 = int(trk.cy + 0.5 * canonical_h)
+        color = (0,255,0) if not occluded else (255,0,0)
         cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
-        label = f"ID:{id}"
-        cv2.putText(img_vis_trk, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
-                    0.5, color, 2)
 
-    if debug_mode:
-        scale = 20
-        for cx, cy, vx, vy, id in debug_info["v_kalmanfilter"]:
-            cx = int(cx)
-            cy = int(cy)
-            id = int(id)
-            offline = id in offline_ids
-            color = get_color(id, offline)
 
-            
-
-            end_x = int(cx + scale * vx)
-            end_y = int(cy + scale * vy)
-            cv2.arrowedLine(img_vis_trk, (cx, cy), (end_x, end_y), 
-                            color=color, thickness=2, tipLength=0.3)
-            
-            # Calculate the velocity magnitude
-            magnitude = (vx**2 + vy**2)**0.5
-            magnitude_label = f"{magnitude:.2f}"
-
-            # Draw the magnitude label just below the center point
-            text_x = cx
-            text_y = cy + 15  # shift downward; adjust value as needed
-            cv2.putText(img_vis_trk, magnitude_label, (text_x, text_y),
-                        fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                        fontScale=0.5, color=color, thickness=2, lineType=cv2.LINE_AA)
-            
-        # draw stable shape
-        for trk in tracker.trackers:
-            stable_w = np.sqrt(trk.canonical_s * trk.canonical_r)
-            stable_h = trk.canonical_s / (stable_w + 1e-6)
-            shape_deviated = trk.is_deviated
-            cx, cy = trk.x.flatten()[:2]
-            x1 = int(cx - 0.5 * stable_w)
-            y1 = int(cy - 0.5 * stable_h)
-            x2 = int(cx + 0.5 * stable_w)
-            y2 = int(cy + 0.5 * stable_h)
-            color = (0,255,255) if shape_deviated else (0,255,0)
-            if shape_deviated:
-                cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
+        
         
     cv2.imwrite(trk_save_folder / img_path.name, img_vis_trk)
