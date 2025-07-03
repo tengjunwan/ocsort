@@ -1,4 +1,4 @@
-OCSort:
+OCSort: 
   det_thresh: 0.7
   max_age: 120
   min_hits: 3 
@@ -6,14 +6,44 @@ OCSort:
   delta_t: 3
   inertia: 0.2 
   use_byte: True
-  low_det_thresh: 0.2
+  low_det_thresh: 0.3
   max_track_num: 60
+  create_new_track_det_thresh: 0.8
+  create_new_track_iou_thresh: 0.3
+  # first round priority(with high confident detection): location > appearance 
+  first_round_buffer_ratio: 0.2
+  first_round_match_iou_threshold: 0.3
+  first_round_match_app_threshold: -0.0
+  first_round_match_app_weight: 0.0
+  first_round_match_app_epsilon: 0.5
+  # second round priority(with low confident detection): location > appearance 
+  second_round_buffer_ratio: 0.2
+  second_round_match_iou_threshold: 0.3
+  second_round_match_app_threshold: -0.0
+  second_round_match_app_weight: 0.0
+  second_round_match_app_epsilon: 0.5
+  # third round priority(with high confident detection): appearance > location
+  third_round_buffer_ratio: 0.5
+  third_round_match_iou_threshold: 0.01
+  third_round_match_app_threshold: 0.4
+  third_round_match_app_weight: 1.0
+  third_round_match_app_epsilon: 0.5
+  verbose: True
 
 YOLO:
-  onnx_path: "pretrained/yolov8n_visdrone_2.onnx"
+  onnx_path: "my_script/yolov8n_visdrone_2.onnx"
   conf_threshold: 0.25
   nms_threshold: 0.7
+  min_w: 10
+  min_h: 10
+
+ReID:
+  onnx_path: "my_script/fastreid_model.onnx"
+  input_size: 128
+  feat_dim: 128
+
   
 EXP:
-  img_foler: "imgs/occlusion_issue_seg_2_yvu"
-  resize_ratio: 1
+  # img_foler: "imgs/screen-20250422-150828_seg_2"
+  img_foler: "test_imgs/DJI_20250606154301_0002_V/DJI_20250606154301_0002_V_gray_car"
+  resize_ratio: 1.0

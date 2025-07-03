@@ -5,8 +5,9 @@ import numpy as np
 import cv2
 import yaml
 
-from inference_onnx import YoloPredictor
+from inference_onnx import YoloPredictor, ReID
 from oc_sort import OCSort
+from camera_motion_compensate import CMC
 
 CONFIG_FILE = './my_script/ocsort_config.yaml'
 with open(CONFIG_FILE, 'r') as file:
@@ -26,8 +27,13 @@ def get_color(idx, less_saturate=False):
     return color
 
 
+# load camera motion compensator
+cmc = CMC(10)
+use_cmc = True
+
 # load model
 predictor = YoloPredictor(**config["YOLO"])
+embedder = ReID(**config["ReID"])
 
 # load imgs
 # img_foler = Path("imgs/frame_yuv")
@@ -64,26 +70,75 @@ resize_ratio = config["EXP"]["resize_ratio"]
 num_images = len(img_paths)
 print(f"images num: {num_images}")
 for i, img_path in enumerate(img_paths):
+    # if i > 300:
+    #     continue
+    img_id = int(img_path.stem)
+    if img_id == 459:
+        print("debug")
+    print(f"processing {i+1}/{num_images} img: {img_path}")
 
-    # if i+1 == 56:
-    #     print("done")
-    print(f"processing {i+1}/{num_images} img...")
+
     img = cv2.imread(img_path)
     if resize_ratio < 0.9 or resize_ratio > 1.1:
         img = cv2.resize(img, dsize=(0, 0), fx=resize_ratio, fy=resize_ratio)
 
-    # detect
+    # detect(YOLO)
     det_results = predictor.predict(img)
     
+    # extract appearance embedding(ReID)
+    det_feats = np.zeros((len(det_results), embedder.feat_dim), dtype=np.float32)
+    for i, (cx, cy, w, h, score) in enumerate(det_results):
+        x1 = max(int(cx - 0.5 * w), 0)
+        y1 = max(int(cy - 0.5 * h), 0)
+        x2 = min(int(cx + 0.5 * w), img.shape[1])
+        y2 = min(int(cy + 0.5 * h), img.shape[0])
+        det_feats[i] = embedder.embed(img[y1:y2, x1:x2])
+
+    # CMC=camera motion compensation(local to gloabl)
+    if use_cmc:
+        _ = cmc.cal_2d_rigid_transformation(img, det_results)
+        global_det_results = cmc.local_to_global(det_results)
+    else:
+        global_det_results = det_results
+        
+
+
     # track
     debug_mode = True
     if debug_mode:
-        rtn_tracks, debug_info = tracker.update(det_results, debug_mode)
+        rtn_tracks, debug_info = tracker.update(global_det_results, det_feats, debug_mode)
     else:
-        rtn_tracks = tracker.update(det_results, debug_mode)
+        rtn_tracks = tracker.update(global_det_results, det_feats, debug_mode)
+
+    # camera motion compensation(global to local)
+    if use_cmc:
+        # load tracks coordinate(global)
+        global_trks = np.zeros((len(rtn_tracks), 4), dtype=np.float32)
+        global_trks_velocity = np.zeros((len(rtn_tracks), 2), dtype=np.float32)
+        for i, trk in enumerate(rtn_tracks):
+            global_trks[i] = [trk.cx, trk.cy, trk.w, trk.h]
+            global_trks_velocity[i] = [trk.vx, trk.vy]
+        # convert from global to local
+        local_trks = cmc.global_to_local(global_trks)
+        for i, trk in enumerate(rtn_tracks):
+            trk.cx, trk.cy, trk.w, trk.h = local_trks[i]
+        # convert velocity direction from global to local for display 
+        M = cmc.cumu_affine_matrix[:2, :2].copy()
+        scale_x = np.linalg.norm(M[:, 0])
+        scale_y = np.linalg.norm(M[:, 1])
+        R = np.zeros((2, 2))
+        R[:, 0] = M[:, 0] / scale_x
+        R[:, 1] = M[:, 1] / scale_y
+        global_trks_velocity_for_display = np.dot(global_trks_velocity, R.T)  # (#trks, 2)
+        for i, trk in enumerate(rtn_tracks):
+            trk.vx, trk.vy = global_trks_velocity_for_display[i]
+
 
     # draw tracker result
     img_vis_trk = img.copy()
+
+    # draw camera motion info 
+    img_vis_trk = cmc.draw_camera_info(img_vis_trk)
 
     # draw detect result
     for cx, cy, w, h, score in det_results:
@@ -100,8 +155,6 @@ for i, img_path in enumerate(img_paths):
     # draw trackers
     scale = 20
     for trk in rtn_tracks:
-        if trk.id == 4:
-            continue
         x1 = int(trk.cx - 0.5 * trk.w)
         y1 = int(trk.cy - 0.5 * trk.h)
         x2 = int(trk.cx + 0.5 * trk.w)
@@ -132,18 +185,25 @@ for i, img_path in enumerate(img_paths):
                     fontFace=cv2.FONT_HERSHEY_SIMPLEX,
                     fontScale=0.5, color=color, thickness=2, lineType=cv2.LINE_AA)
         
+        # draw similarity
+        update_similarity = trk.update_similarity
+        label = f" {update_similarity:.2f}"
+        cv2.putText(img_vis_trk, label, (x1, y2 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
+                    0.5, color, 2)
+
+        
         # draw occlusion info
-        occluded = trk.occluded
-        canonical_s = trk.canonical_s
-        canonical_r = trk.canonical_r
-        canonical_w = np.sqrt(canonical_s * canonical_r)
-        canonical_h = canonical_s / (canonical_w + 1e-6)
-        x1 = int(trk.cx - 0.5 * canonical_w)
-        y1 = int(trk.cy - 0.5 * canonical_h)
-        x2 = int(trk.cx + 0.5 * canonical_w)
-        y2 = int(trk.cy + 0.5 * canonical_h)
-        color = (0,255,0) if not occluded else (255,0,0)
-        cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
+        # occluded = trk.occluded
+        # canonical_s = trk.canonical_s
+        # canonical_r = trk.canonical_r
+        # canonical_w = np.sqrt(canonical_s * canonical_r)
+        # canonical_h = canonical_s / (canonical_w + 1e-6)
+        # x1 = int(trk.cx - 0.5 * canonical_w)
+        # y1 = int(trk.cy - 0.5 * canonical_h)
+        # x2 = int(trk.cx + 0.5 * canonical_w)
+        # y2 = int(trk.cy + 0.5 * canonical_h)
+        # color = (0,255,0) if not occluded else (255,0,0)
+        # cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
 
 
         

@@ -63,6 +63,16 @@ class KalmanFilterBoxTrackerNoMatrix():
         self.id = KalmanFilterBoxTrackerNoMatrix.count + 1  # start from 1
         KalmanFilterBoxTrackerNoMatrix.count += 1
 
+        # appearance embedding
+        self.feat = None  # a N-dim vector
+        self.alpha_f = 0.95
+        self.update_det_conf_score = 0.9
+        self.update_det_score = 0.0
+        self.update_simiarity = 1
+
+
+
+
 
     def predict(self, is_virtual=False):
         # update age 
@@ -70,7 +80,8 @@ class KalmanFilterBoxTrackerNoMatrix():
             self.age = self.age + 1
 
         # area is forced to be non-negative
-        if((self.x[6]+self.x[2]) <= 0):
+        min_area = 400  # 20*20 pixels
+        if((self.x[6]+self.x[2]) <= min_area):
             self.x[6] *= 0.0
 
         R = self.R
@@ -297,6 +308,64 @@ class KalmanFilterBoxTrackerNoMatrix():
     def _update_canonical_shape(self, s, r):
         self.canonical_s = self.canonical_s * self.shape_update_coeff + s * (1 - self.shape_update_coeff)
         self.canonical_r = self.canonical_r * self.shape_update_coeff + r * (1 - self.shape_update_coeff)
+
+    def update_appearance(self, feat, det_score):
+        # first update, no matter what det_score is, it's a useful start
+        if self.feat is None:  
+            self.feat = feat
+            self.update_det_score = det_score
+            self.update_simiarity = 1.0  # get cos similarity for debug
+            return 
+        
+        self.update_simiarity = self._cal_cos_similarity(self.feat, feat)  # get cos similarity for debug
+        
+        
+        if self.update_det_score < self.update_det_conf_score:
+            if det_score > self.update_det_score:  # more confident than previous update while no one confident enough update
+                self.feat = feat
+                self.update_det_score = det_score
+            else:
+                pass
+        else:
+            if det_score > self.update_det_score:  # confident enough then use EMA to average all confident updates
+                # confident enough
+                dynamci_alpha = self.alpha_f + \
+                    (1 - self.alpha_f) * (1 - (det_score - self.update_det_conf_score) / (1 - self.update_det_conf_score))
+                dynamci_alpha = min(dynamci_alpha, 1)
+                self.feat = dynamci_alpha * self.feat + (1 - dynamci_alpha) * feat
+                self.update_det_score = det_score
+
+    # def update_appearance(self, feat, det_score):
+    #     if self.feat is None:  
+    #         self.feat = feat
+    #         self.update_det_score = det_score
+    #         self.update_simiarity = 1.0  # get cos similarity for debug
+    #         return 
+        
+    #     self.update_simiarity = self._cal_cos_similarity(self.feat, feat)  # get cos similarity for debug
+        
+        
+    #     dynamci_alpha = self.alpha_f + \
+    #         (1 - self.alpha_f) * (1 - (det_score - self.update_det_conf_score) / (1 - self.update_det_conf_score))
+    #     dynamci_alpha = min(dynamci_alpha, 1)
+    #     self.feat = dynamci_alpha * self.feat + (1 - dynamci_alpha) * feat
+    #     self.update_det_score = det_score
+
+    def get_appearance(self):
+        return self.feat
+    
+    
+    def _cal_cos_similarity(self, feat1, feat2):
+        # Compute cosine similarity
+        dot_product = np.dot(feat1, feat2)
+        norm1 = np.linalg.norm(feat1)
+        norm2 = np.linalg.norm(feat2)
+
+        if norm1 == 0 or norm2 == 0:
+            return 0.0  # Avoid division by zero
+        
+        cos_similarity = dot_product / (norm1 * norm2)
+        return cos_similarity
 
     
 

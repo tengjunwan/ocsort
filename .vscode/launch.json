@@ -45,5 +45,22 @@
               "--save_result"
             ]
         },
+        {
+            "name": "Test My OC-SORT",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/my_script/test_ocsort.py",
+            "console": "integratedTerminal"
+            // "args": [
+            //   "--demo_type", "image",
+            //   "-f", "exps/example/mot/yolox_m_mix_det.py",
+            //   "-c", "pretrained/yolox_m.pth",
+            //   "--path", "imgs/uav0000306_00230_v",
+            //   "--track_thresh", "0.7",
+            //   "--fp16",
+            //   "--fuse",
+            //   "--save_result"
+            // ]
+        },
     ]
 }
