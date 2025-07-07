@@ -19,14 +19,14 @@ OCSort:
   # second round priority(with low confident detection): location > appearance 
   second_round_buffer_ratio: 0.2
   second_round_match_iou_threshold: 0.3
-  second_round_match_app_threshold: -0.0
+  second_round_match_app_threshold: -0.3
   second_round_match_app_weight: 0.0
   second_round_match_app_epsilon: 0.5
   # third round priority(with high confident detection): appearance > location
   third_round_buffer_ratio: 0.5
   third_round_match_iou_threshold: 0.01
   third_round_match_app_threshold: 0.4
-  third_round_match_app_weight: 1.0
+  third_round_match_app_weight: 0.5
   third_round_match_app_epsilon: 0.5
   verbose: True
 
@@ -45,5 +45,5 @@ ReID:
   
 EXP:
   # img_foler: "imgs/screen-20250422-150828_seg_2"
-  img_foler: "test_imgs/DJI_20250606154301_0002_V/DJI_20250606154301_0002_V_gray_car"
+  img_foler: "test_imgs/DJI_20250606154644_0003_V/DJI_20250606154644_0003_V_silver_car"
   resize_ratio: 1.0

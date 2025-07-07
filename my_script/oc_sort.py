@@ -107,7 +107,7 @@ def oc_associate(detections, trackers, iou_threshold, buffer_ratio,  # locations
         detections (numpy.ndarray): Detection results from a detector (e.g., YOLO),
             shape = (num_detections, 5), where each detection is (cx, cy, w, h, score).
         trackers (numpy.ndarray): Predicted locations from a tracker (e.g., KalmanFilter),
-            shape = (num_trackers, 4), where each tracker is (cx, cy, w, h).
+            shape = (num_trackers, 5), where each tracker is (cx, cy, w, h, id).
         iou_threshold (float): Minimum IoU required to associate a detection with a tracker.
         velocities (numpy.ndarray): Velocity vectors predicted by KalmanFilter,
             shape = (num_trackers, 2), where each vector is (vx, vy).
@@ -137,7 +137,7 @@ def oc_associate(detections, trackers, iou_threshold, buffer_ratio,  # locations
         return np.empty((0,2),dtype=int), np.arange(len(detections)), np.arange(len(trackers))
 
     # part 1: calculate iou reward matrix
-    iou_matrix = iou_batch(detections[:, :4], trackers, buffer_ratio)  # (#dets, #trks), reward matrix
+    iou_matrix = iou_batch(detections[:, :4], trackers[:, :4], buffer_ratio)  # (#dets, #trks), reward matrix
     non_overlap_mask = iou_matrix < 0.00001
 
     # part 2: calculate v_directioin reward matrix(#dets, #trks)
@@ -361,12 +361,12 @@ class OCSort(object):
         det_feats_second = det_feats[mid_conf_mask]
 
         # get predicted locations of existing trackers
-        trks = np.zeros((len(self.trackers), 4), dtype=np.float32)  # (#trks, 4), cx, cy, w, h
+        trks = np.zeros((len(self.trackers), 5), dtype=np.float32)  # (#trks, 4), cx, cy, w, h, id
         for i in range(len(self.trackers)):
-            trks[i] = self.trackers[i].predict()
+            cx, cy, w, h = self.trackers[i].predict()
+            id = self.trackers[i].id
+            trks[i] = np.array([cx, cy, w, h, id], dtype=np.float32)
             if debug_mode:
-                cx, cy, w, h = trks[i]
-                id = self.trackers[i].id
                 debug_info["predict_bbox"].append(np.array([cx, cy, w, h, id], dtype=np.float32))
 
         # get appearnce of existing trackers
@@ -608,7 +608,7 @@ class OCSort(object):
             if score < self.create_new_track_det_thresh:
                 continue
             if len(trks) != 0:
-                iou_with_trks = iou_batch(np.array([[cx, cy, w, h]]), trks)  # do not create track by unassigned detection due to low appearance similarity(parital occluded)
+                iou_with_trks = iou_batch(np.array([[cx, cy, w, h]]), trks[:, :4])  # do not create track by unassigned detection due to low appearance similarity(parital occluded)
                 if np.max(iou_with_trks) > self.create_new_track_iou_thresh:
                     continue
             new_tracker = KalmanFilterBoxTracker(cx, cy, w, h, self.delta_t)

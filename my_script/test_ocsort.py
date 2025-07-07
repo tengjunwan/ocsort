@@ -7,7 +7,7 @@ import yaml
 
 from inference_onnx import YoloPredictor, ReID
 from oc_sort import OCSort
-from camera_motion_compensate import CMC
+from camera_motion_compensate import UnifiedCMC
 
 CONFIG_FILE = './my_script/ocsort_config.yaml'
 with open(CONFIG_FILE, 'r') as file:
@@ -28,7 +28,8 @@ def get_color(idx, less_saturate=False):
 
 
 # load camera motion compensator
-cmc = CMC(10)
+cmc_method = "optflow"  # "orb" or "optflow"
+cmc = UnifiedCMC(30, cmc_method, 0.25)
 use_cmc = True
 
 # load model
@@ -73,7 +74,7 @@ for i, img_path in enumerate(img_paths):
     # if i > 300:
     #     continue
     img_id = int(img_path.stem)
-    if img_id == 459:
+    if img_id == 246:
         print("debug")
     print(f"processing {i+1}/{num_images} img: {img_path}")
 
@@ -96,7 +97,7 @@ for i, img_path in enumerate(img_paths):
 
     # CMC=camera motion compensation(local to gloabl)
     if use_cmc:
-        _ = cmc.cal_2d_rigid_transformation(img, det_results)
+        _ = cmc.update(img, det_results)
         global_det_results = cmc.local_to_global(det_results)
     else:
         global_det_results = det_results

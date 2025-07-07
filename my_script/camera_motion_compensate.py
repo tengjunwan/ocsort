@@ -2,97 +2,158 @@ import cv2
 import numpy as np
 
 
-class CMC():
-    """CMC = camera motion compensation"""
-    def __init__(self, min_features):
-        # for feature matching(ORB) based method
+class UnifiedCMC:
+    def __init__(self, min_features=30, method='orb', resize_ratio=0.25):
+        """
+        Unified Camera Motion Compensation supporting ORB and Optical Flow
+        method: 'orb' or 'optflow'
+        """
+        self.method = method
         self.min_features = min_features
         self.prev_gray = None
         self.prev_desc = None
         self.prev_kp = None
-        self.curr_affine_matrix = np.eye(3, 3)
-        self.cumu_affine_matrix = np.eye(3, 3)
+        self.prev_pts = None  # For optical flow
+        self.curr_affine_matrix = np.eye(3)
+        self.cumu_affine_matrix = np.eye(3)
         self.img_shape = None
+        self.resize_ratio = resize_ratio
 
-    def cal_2d_rigid_transformation(self, curr_frame, dets):
-        """
-        Compute the 2D affine transform from prev_frame to 
-        curr_frame using ORB feature matching.
-        """
-        if self.img_shape is  not None:
-            assert self.img_shape == curr_frame.shape[:2]
+        self.orb_config = {"orb_num": 1000}
+        self.optflow_config = {"maxCorners": 50, 
+                               "qualityLevel": 0.01, 
+                               "minDistance": 7,
+                               "winSize": (15, 15),
+                               "maxLevel": 3
+                               }
+
+    def _get_mask_by_detection(self, img, dets):
+        mask = np.ones((img.shape[0], img.shape[1]), dtype=np.uint8)
+        for cx, cy, w, h, _ in dets:
+            x1 = max(int(cx - 0.5 * w), 0)
+            y1 = max(int(cy - 0.5 * h), 0)
+            x2 = min(int(cx + 0.5 * w), img.shape[1])
+            y2 = min(int(cy + 0.5 * h), img.shape[0])
+            mask[y1: y2, x1: x2] = 0
+        return mask
+
+    def _extract_features(self, img, mask):
+        orb = cv2.ORB_create(self.orb_config["orb_num"])
+        keypoints, descriptors = orb.detectAndCompute(img, mask)
+        return keypoints, descriptors
+
+    def _match_features(self, desc1, desc2):
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        matches = bf.match(desc1, desc2)
+        matches = sorted(matches, key=lambda x: x.distance)
+        return matches
+
+    def _estimate_rigid_transform(self, kp1, kp2, matches):
+        src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 2)
+        dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 2)
+        if self.resize_ratio < 1.0:  # encounter resize effect
+            src_pts /= self.resize_ratio
+            dst_pts /= self.resize_ratio
+        h, w = self.img_shape
+        center = np.array([w / 2, h / 2])
+        src_pts -= center
+        dst_pts -= center
+        matrix, _ = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
+        return matrix
+
+    def _get_sparse_points(self, gray, mask):
+        return cv2.goodFeaturesToTrack(gray, 
+                                       maxCorners=self.optflow_config["maxCorners"], 
+                                       qualityLevel=self.optflow_config["qualityLevel"], 
+                                       minDistance=self.optflow_config["minDistance"], 
+                                       mask=mask)
+
+    def _estimate_rigid_transform_from_points(self, pts1, pts2):
+        h, w = self.img_shape
+        center = np.array([[w / 2, h / 2]])
+        if self.resize_ratio < 1.0:  # encounter resize effect
+            pts1 = pts1.reshape(-1, 2) / self.resize_ratio - center
+            pts2 = pts2.reshape(-1, 2) / self.resize_ratio - center
+        else:
+            pts1 = pts1.reshape(-1, 2) - center
+            pts2 = pts2.reshape(-1, 2) - center
+        matrix, _ = cv2.estimateAffinePartial2D(pts1, pts2, method=cv2.RANSAC)
+        return matrix
+
+    def update(self, curr_frame, dets):
+        if self.img_shape is None:
+            self.img_shape = curr_frame.shape[:2]
+
+        if self.resize_ratio < 1.0:
+            curr_frame = cv2.resize(curr_frame, dsize=None, fx=self.resize_ratio, fy=self.resize_ratio)
+            if (len(dets)):
+                org_dets = dets
+                dets = org_dets.copy()
+                dets[:, :4] = org_dets[:, :4] * self.resize_ratio
+
         curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-        mask = self._get_mask_by_detection(curr_frame, dets)
-        
-        
-        # If no previous frame, just store current and return identity
-        if self.prev_gray is None:
-            self.img_shape = curr_gray.shape
+        mask = self._get_mask_by_detection(curr_gray, dets)
+
+        if self.prev_gray is None:   # first frame
             self.prev_gray = curr_gray
-            self.prev_kp, self.prev_desc = self._extract_features(curr_gray, mask)
-            self.curr_affine_matrix = np.eye(3, 3)
-            return self.curr_affine_matrix
+            if self.method == 'orb':
+                self.prev_kp, self.prev_desc = self._extract_features(curr_gray, mask)
+            else:
+                self.prev_pts = self._get_sparse_points(curr_gray, mask)
+            return np.eye(3)
 
+        # use 2 different methods to get transform matrix from prev_frame to curr_frame
+        if self.method == 'orb':
+            A = self._update_orb(curr_gray, mask)
+        else:
+            A = self._update_optical_flow(curr_gray, mask)
+
+
+        self.curr_affine_matrix = np.eye(3)
+        self.curr_affine_matrix[:2] = A
+        self.cumu_affine_matrix = self.curr_affine_matrix @ self.cumu_affine_matrix
+        return self.curr_affine_matrix
+
+    def _update_orb(self, curr_gray, mask):
         curr_kp, curr_desc = self._extract_features(curr_gray, mask)
-
-        # Handle insufficient features
         if (self.prev_desc is None or curr_desc is None or
             len(self.prev_desc) < self.min_features or len(curr_desc) < self.min_features):
-            print("Not enough descriptors")
             A = np.eye(2, 3)
         else:
             matches = self._match_features(self.prev_desc, curr_desc)
             if len(matches) < self.min_features:
-                print("Not enough good matches")
                 A = np.eye(2, 3)
             else:
                 A = self._estimate_rigid_transform(self.prev_kp, curr_kp, matches)
                 if A is None:
                     A = np.eye(2, 3)
-
-        # Save current as previous for next round
         self.prev_gray = curr_gray
         self.prev_kp = curr_kp
         self.prev_desc = curr_desc
-        self.curr_affine_matrix = np.eye(3, 3)
-        self.curr_affine_matrix[:2] = A  # use 3*3 homogenous matrix form 
-        self.cumu_affine_matrix = self.curr_affine_matrix @ self.cumu_affine_matrix  # cumulative matrix form
-        return self.curr_affine_matrix
+        return A
 
-    # def global_to_local(self, dets):
-    #     if len(dets) == 0:
-    #         return dets.copy()
+    def _update_optical_flow(self, curr_gray, mask):
+        if self.prev_pts is None or len(self.prev_pts) < self.min_features:
+            self.prev_pts = self._get_sparse_points(self.prev_gray, mask)
+            self.prev_gray = curr_gray
+            return np.eye(2, 3)
 
-    #     # Convert from [cx, cy, w, h] to [x1, y1], [x2, y2]
-    #     cxcy = dets[:, :2]
-    #     wh = dets[:, 2:4]
-    #     x1y1 = cxcy - wh / 2
-    #     x2y2 = cxcy + wh / 2
+        curr_pts, status, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray, curr_gray, self.prev_pts, 
+                                                       self.optflow_config["winSize"],
+                                                       self.optflow_config["maxLevel"])
+        good_prev = self.prev_pts[status.flatten() == 1]
+        good_curr = curr_pts[status.flatten() == 1]
 
-    #     # remove rotation
-    #     clean_cumu_affine_matrix = self.cumu_affine_matrix.copy()
-    #     clean_cumu_affine_matrix[0, 1] = 0
-    #     clean_cumu_affine_matrix[1, 0] = 0
+        if len(good_prev) < self.min_features:
+            A = np.eye(2, 3)
+        else:
+            A = self._estimate_rigid_transform_from_points(good_prev, good_curr)
+            if A is None:
+                A = np.eye(2, 3)
 
-    #     corners = np.vstack([x1y1, x2y2])   # (2 * #dets, 2)
-    #     homog = np.hstack([corners, np.ones((corners.shape[0], 1))])  # (2 * #dets, 3)
-    #     new_corners = np.dot(homog, clean_cumu_affine_matrix[:2].T)  # (2 * #dets, 2)
-
-    #     new_x1y1 = new_corners[:len(dets)]
-    #     new_x2y2 = new_corners[len(dets):]
-
-    #     new_cxcy = (new_x1y1 + new_x2y2) / 2
-    #     new_wh = new_x2y2 - new_x1y1
-
-    #     # take top left ponit as origin
-    #     h, w = self.img_shape
-    #     center = np.array([w / 2, h / 2])
-    #     new_cxcy = new_cxcy + center
-
-    #     new_dets = dets.copy()
-    #     new_dets[:, 0:2] = new_cxcy
-    #     new_dets[:, 2:4] = new_wh
-    #     return new_dets
+        self.prev_pts = self._get_sparse_points(curr_gray, mask)
+        self.prev_gray = curr_gray
+        return A
     
     def global_to_local(self, dets):
         if len(dets) == 0:
@@ -120,42 +181,6 @@ class CMC():
         new_dets[:, 0:2] = new_cxcy
         new_dets[:, 2:4] = new_wh
         return new_dets
-
-    # def local_to_global(self, dets):
-    #     if len(dets) == 0:
-    #         return dets.copy()
-
-    #     cxcy = dets[:, :2]  # (#dets, 2)
-
-    #     # take center ponit as origin
-    #     h, w = self.img_shape
-    #     center = np.array([w / 2, h / 2])
-    #     cxcy = cxcy - center
-
-    #     wh = dets[:, 2:4]  # (#dets, 2)
-    #     x1y1 = cxcy - wh / 2  # (#dets, 2)
-    #     x2y2 = cxcy + wh / 2  # (#dets, 2)
-
-    #     # remove rotation
-    #     clean_cumu_affine_matrix = self.cumu_affine_matrix[:2]  # (2, 3)
-    #     clean_cumu_affine_matrix[0, 1] = 0
-    #     clean_cumu_affine_matrix[1, 0] = 0
-
-    #     corners = np.vstack([x1y1, x2y2])  # (2 * #dets, 2)
-    #     homog = np.hstack([corners, np.ones((corners.shape[0], 1))])  # (2 * #dets, 3)
-    #     inv_matrix = cv2.invertAffineTransform(clean_cumu_affine_matrix)  # (2, 3)
-    #     new_corners = np.dot(homog, inv_matrix.T)  # (2 * #dets, 2)
-
-    #     new_x1y1 = new_corners[:len(dets)]
-    #     new_x2y2 = new_corners[len(dets):]
-
-    #     new_cxcy = (new_x1y1 + new_x2y2) / 2
-    #     new_wh = new_x2y2 - new_x1y1
-
-    #     new_dets = dets.copy()
-    #     new_dets[:, 0:2] = new_cxcy
-    #     new_dets[:, 2:4] = new_wh
-    #     return new_dets
     
     def local_to_global(self, dets):
         # only transform center point
@@ -186,41 +211,6 @@ class CMC():
         new_dets[:, 0:2] = new_cxcy
         new_dets[:, 2:4] = new_wh
         return new_dets
-
-    def _extract_features(self, img, mask):
-        orb = cv2.ORB_create(1000)
-        keypoints, descriptors = orb.detectAndCompute(img, mask)
-        return keypoints, descriptors
-    
-    def _match_features(self, desc1, desc2):
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)  # NORM_L2 for SIFT
-        matches = bf.match(desc1, desc2)
-        matches = sorted(matches, key=lambda x: x.distance)
-        return matches
-    
-    def _estimate_rigid_transform(self, kp1, kp2, matches):
-        src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 2)
-        dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 2)
-        # take center ponit as origin
-        h, w = self.img_shape
-        center = np.array([w / 2, h / 2])
-        src_pts = src_pts - center
-        dst_pts = dst_pts - center
-        # Use estimateAffinePartial2D for rigid transform (no scaling/shear)
-        matrix, inliers = cv2.estimateAffinePartial2D(src_pts, dst_pts, method=cv2.RANSAC)
-        return matrix
-    
-    def _get_mask_by_detection(self, img, dets):
-        # shape of dets = (#dets, 5) cx, cy, w, h, score
-        mask = np.ones((img.shape[0], img.shape[1]), dtype=np.uint8)
-        for cx, cy, w, h, _ in dets:
-            x1 = max(int(cx - 0.5 * w), 0)
-            y1 = max(int(cy - 0.5 * h), 0)
-            x2 = min(int(cx + 0.5 * w), img.shape[1])
-            y2 = min(int(cy + 0.5 * h), img.shape[0])
-            mask[y1: y2, x1: x2] = 0
-
-        return mask
     
     def _decompose_affine(self, A):
         # A: 2x3 or 3x3 affine matrix
@@ -284,6 +274,8 @@ class CMC():
 
         return image  # Optional: return it if you want to chain ops
 
+
+
 if __name__ == "__main__":
     from pathlib import Path
     import shutil
@@ -295,7 +287,8 @@ if __name__ == "__main__":
     
 
     predictor = YoloPredictor()
-    cmc = CMC(10)
+    # cmc = UnifiedCMC(min_features=80, method='orb')
+    cmc = UnifiedCMC(min_features=30, method='optflow', resize_ratio=0.25)
 
     np.set_printoptions(precision=3, suppress=True)
 
@@ -305,13 +298,13 @@ if __name__ == "__main__":
     vis_dir.mkdir()
 
 
-    img_dir = Path("imgs/org_882be656fc94dade_1747721858000_seg_10")
+    img_dir = Path("test_imgs/DJI_20250606154301_0002_V/DJI_20250606154301_0002_V_black_car")
     img_paths = sorted(list(img_dir.glob("*.jpg")))
     img_num = len(img_paths)
-    for i, img_path in tqdm(enumerate(img_paths), total=img_num):
+    for j, img_path in tqdm(enumerate(img_paths), total=img_num):
         img = cv2.imread(str(img_path))
         dets = predictor.predict(img)
-        curr_affine_matrix = cmc.cal_2d_rigid_transformation(img, dets)
+        curr_affine_matrix = cmc.update(img, dets)
 
         global_dets = cmc.local_to_global(dets)
         local_dets = cmc.global_to_local(global_dets)
@@ -330,9 +323,9 @@ if __name__ == "__main__":
             label = f"({g_cx:.1f}, {g_cy:.1f}): {score:.2f}"
             cv2.putText(img_vis, label, (x2 - 80, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                         0.5, (0,0,255), 2)
-            cmc.draw_camera_info(img_vis)
-            
-            cv2.imwrite(vis_dir / img_path.name, img_vis)
+        cmc.draw_camera_info(img_vis)
+        
+        cv2.imwrite(vis_dir / img_path.name, img_vis)
             
             
 
