@@ -4,10 +4,42 @@ import shutil
 import numpy as np
 import cv2
 import yaml
+import matplotlib.pyplot as plt
 
-from inference_onnx import YoloPredictor, ReID
+from object_detect import YoloPredictor
+from appearance_embed import ReID, EfficientReIDStrategy
 from oc_sort import OCSort
+from oc_sort import appereance_batch
 from camera_motion_compensate import UnifiedCMC
+
+
+
+
+def save_app_matrix_heatmap(app_matrix, trk_ids, filename='app_matrix_heatmap.png', dpi=100):
+    plt.figure(figsize=(8, 5))
+
+    im = plt.imshow(app_matrix, cmap='coolwarm', vmin=-1, vmax=1, aspect='auto')
+    plt.colorbar(im, label='Cosine Similarity')
+
+    plt.xlabel('Track ID')
+    plt.ylabel('Detection Index')
+    plt.title('Appearance Similarity Heatmap')
+
+    plt.xticks(ticks=np.arange(len(trk_ids)), labels=trk_ids, rotation=45)
+    plt.yticks(ticks=np.arange(app_matrix.shape[0]), labels=np.arange(app_matrix.shape[0]))
+
+    # Annotate each cell with its value
+    num_rows, num_cols = app_matrix.shape
+    for i in range(num_rows):
+        for j in range(num_cols):
+            val = app_matrix[i, j]
+            text_color = 'white' if abs(val) > 0.5 else 'black'
+            plt.text(j, i, f"{val:.2f}", ha='center', va='center', color=text_color, fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(filename, dpi=dpi)
+    plt.close()
+
 
 CONFIG_FILE = './my_script/ocsort_config.yaml'
 with open(CONFIG_FILE, 'r') as file:
@@ -28,13 +60,16 @@ def get_color(idx, less_saturate=False):
 
 
 # load camera motion compensator
-cmc_method = "optflow"  # "orb" or "optflow"
-cmc = UnifiedCMC(30, cmc_method, 0.25)
-use_cmc = True
+cmc = UnifiedCMC(**config["CMC"])
+
+# load ReID strategy
+use_efficient_strategy = config["EXP"]["use_efficient_strategy"]
+if use_efficient_strategy:
+    reid_strategy = EfficientReIDStrategy(**config["EfficientReIDStrategy"])
 
 # load model
-predictor = YoloPredictor(**config["YOLO"])
-embedder = ReID(**config["ReID"])
+predictor = YoloPredictor(**config["YOLO"])  # for object detection
+embedder = ReID(**config["ReID"])  # for appearance embedding
 
 # load imgs
 # img_foler = Path("imgs/frame_yuv")
@@ -54,10 +89,11 @@ debug_secondAssign_save_folder = Path("vis_secondAssign")
 debug_thirdAssign_save_folder = Path("vis_thirdAssign")
 debug_newlyCreate_save_folder = Path("vis_newlyCreate")
 debug_newlyDelete_save_folder = Path("vis_newlyDelete")
+debug_app_matrix = Path("vis_app_matrix")
 for folder in [trk_save_folder, det_save_folder, debug_pred_save_folder, debug_vdir_save_folder,
                 debug_lastOb_save_folder, debug_prevCenter_save_folder, debug_firstAssign_save_folder,
                 debug_secondAssign_save_folder, debug_thirdAssign_save_folder,
-                debug_newlyCreate_save_folder, debug_newlyDelete_save_folder]:
+                debug_newlyCreate_save_folder, debug_newlyDelete_save_folder, debug_app_matrix]:
     if folder.exists():
         shutil.rmtree(folder)
     folder.mkdir()
@@ -68,13 +104,16 @@ tracker = OCSort(**config["OCSort"])
 
 np.set_printoptions(suppress=True, precision=3, linewidth=150)
 resize_ratio = config["EXP"]["resize_ratio"]
+use_cmc = config["EXP"]["use_cmc"]
+delayed_update = config["EXP"]["delayed_update"]
 num_images = len(img_paths)
 print(f"images num: {num_images}")
 for i, img_path in enumerate(img_paths):
     # if i > 300:
     #     continue
+    
     img_id = int(img_path.stem)
-    if img_id == 246:
+    if img_id == 285:
         print("debug")
     print(f"processing {i+1}/{num_images} img: {img_path}")
 
@@ -83,21 +122,38 @@ for i, img_path in enumerate(img_paths):
     if resize_ratio < 0.9 or resize_ratio > 1.1:
         img = cv2.resize(img, dsize=(0, 0), fx=resize_ratio, fy=resize_ratio)
 
+
+    if use_cmc and cmc.img_shape is None:
+        cmc.set_img_shape(img.shape[:2])
+
     # detect(YOLO)
     det_results = predictor.predict(img)
     
     # extract appearance embedding(ReID)
+    # selectively pick detections to do appearance embedding(use strategy)
+    if use_efficient_strategy:
+        target_position = np.array([img.shape[1] / 2.0, img.shape[0] / 2.0])
+        is_target_tracked = True
+        selective_det_idx = reid_strategy.select(det_results, target_position, is_target_tracked)
+    else:
+        selective_det_idx = np.arange(len(det_results))
+
+    # do embedding
     det_feats = np.zeros((len(det_results), embedder.feat_dim), dtype=np.float32)
+    def_feats_mask = np.zeros(len(det_results), dtype=bool)  
     for i, (cx, cy, w, h, score) in enumerate(det_results):
-        x1 = max(int(cx - 0.5 * w), 0)
-        y1 = max(int(cy - 0.5 * h), 0)
-        x2 = min(int(cx + 0.5 * w), img.shape[1])
-        y2 = min(int(cy + 0.5 * h), img.shape[0])
-        det_feats[i] = embedder.embed(img[y1:y2, x1:x2])
+        if i in selective_det_idx:
+            x1 = max(int(cx - 0.5 * w), 0)
+            y1 = max(int(cy - 0.5 * h), 0)
+            x2 = min(int(cx + 0.5 * w), img.shape[1])
+            y2 = min(int(cy + 0.5 * h), img.shape[0])
+            det_feats[i] = embedder.embed(img[y1:y2, x1:x2])
+            def_feats_mask[i] = True
 
     # CMC=camera motion compensation(local to gloabl)
     if use_cmc:
-        _ = cmc.update(img, det_results)
+        if not delayed_update:
+            _ = cmc.update(img, det_results)
         global_det_results = cmc.local_to_global(det_results)
     else:
         global_det_results = det_results
@@ -107,9 +163,9 @@ for i, img_path in enumerate(img_paths):
     # track
     debug_mode = True
     if debug_mode:
-        rtn_tracks, debug_info = tracker.update(global_det_results, det_feats, debug_mode)
+        rtn_tracks, debug_info = tracker.update(global_det_results, det_feats, def_feats_mask, debug_mode)
     else:
-        rtn_tracks = tracker.update(global_det_results, det_feats, debug_mode)
+        rtn_tracks = tracker.update(global_det_results, det_feats, def_feats_mask, debug_mode)
 
     # camera motion compensation(global to local)
     if use_cmc:
@@ -134,7 +190,11 @@ for i, img_path in enumerate(img_paths):
         for i, trk in enumerate(rtn_tracks):
             trk.vx, trk.vy = global_trks_velocity_for_display[i]
 
+    if use_cmc and delayed_update:  # delay update 
+        _ = cmc.update(img, det_results)
 
+
+    # =================================visualization=================================
     # draw tracker result
     img_vis_trk = img.copy()
 
@@ -142,16 +202,22 @@ for i, img_path in enumerate(img_paths):
     img_vis_trk = cmc.draw_camera_info(img_vis_trk)
 
     # draw detect result
-    for cx, cy, w, h, score in det_results:
+    for i, (cx, cy, w, h, score) in enumerate(det_results):
+        if i in selective_det_idx:
+            embedded = True
+        else:
+            embedded = False
         x1 = int(cx - 0.5 * w)
         y1 = int(cy - 0.5 * h)
         x2 = int(cx + 0.5 * w)
         y2 = int(cy + 0.5 * h)
         cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), 
                     (0,0,255), 1)
-        label = f" {score:.2f}"
+        label = f"{i}: {score:.2f}"
         cv2.putText(img_vis_trk, label, (x2 - 40, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                     0.5, (0,0,255), 2)
+        if embedded:
+            cv2.circle(img_vis_trk, (int(cx), int(cy)), radius=5, color=(0,0,255), thickness=-1)
 
     # draw trackers
     scale = 20
@@ -191,6 +257,8 @@ for i, img_path in enumerate(img_paths):
         label = f" {update_similarity:.2f}"
         cv2.putText(img_vis_trk, label, (x1, y2 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                     0.5, color, 2)
+        
+
 
         
         # draw occlusion info
@@ -206,7 +274,26 @@ for i, img_path in enumerate(img_paths):
         # color = (0,255,0) if not occluded else (255,0,0)
         # cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 2)
 
-
-        
-        
     cv2.imwrite(trk_save_folder / img_path.name, img_vis_trk)
+
+
+    # draw appearance embedding
+    
+    # get appearnce of existing trackers
+    # trk_feats = np.zeros((len(tracker.trackers), embedder.feat_dim), dtype=np.float32)  
+    # trk_ids = []
+    # for i in range(len(tracker.trackers)):
+    #     app = tracker.trackers[i].get_appearance()
+    #     if app is None:  # not seen yet due to ReID strategy
+    #         app = np.zeros(embedder.feat_dim, dtype=np.float32)
+    #     trk_feats[i] = app
+
+    #     trk_ids.append(tracker.trackers[i].id)
+
+    
+    # app_matrix = appereance_batch(det_feats, trk_feats)
+    # app_vis_save_path = debug_app_matrix / img_path.name
+    # save_app_matrix_heatmap(app_matrix, trk_ids, str(app_vis_save_path))
+
+
+

@@ -3,7 +3,7 @@ import numpy as np
 
 
 class UnifiedCMC:
-    def __init__(self, min_features=30, method='orb', resize_ratio=0.25):
+    def __init__(self, min_features=30, method='orb', img_shape=(640, 640), **kwargs):
         """
         Unified Camera Motion Compensation supporting ORB and Optical Flow
         method: 'orb' or 'optflow'
@@ -17,7 +17,8 @@ class UnifiedCMC:
         self.curr_affine_matrix = np.eye(3)
         self.cumu_affine_matrix = np.eye(3)
         self.img_shape = None
-        self.resize_ratio = resize_ratio
+        self.resize_ratio_x = 1
+        self.resize_ratio_y = 1
 
         self.orb_config = {"orb_num": 1000}
         self.optflow_config = {"maxCorners": 50, 
@@ -51,9 +52,13 @@ class UnifiedCMC:
     def _estimate_rigid_transform(self, kp1, kp2, matches):
         src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 2)
         dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 2)
-        if self.resize_ratio < 1.0:  # encounter resize effect
-            src_pts /= self.resize_ratio
-            dst_pts /= self.resize_ratio
+
+        # encounter resize effect
+        src_pts[:, 0] = src_pts[:, 0] / self.resize_ratio_x
+        src_pts[:, 1] = src_pts[:, 1] / self.resize_ratio_y
+        dst_pts[:, 0] = dst_pts[:, 0] / self.resize_ratio_x
+        dst_pts[:, 1] = dst_pts[:, 1] / self.resize_ratio_y
+
         h, w = self.img_shape
         center = np.array([w / 2, h / 2])
         src_pts -= center
@@ -71,27 +76,39 @@ class UnifiedCMC:
     def _estimate_rigid_transform_from_points(self, pts1, pts2):
         h, w = self.img_shape
         center = np.array([[w / 2, h / 2]])
-        if self.resize_ratio < 1.0:  # encounter resize effect
-            pts1 = pts1.reshape(-1, 2) / self.resize_ratio - center
-            pts2 = pts2.reshape(-1, 2) / self.resize_ratio - center
-        else:
-            pts1 = pts1.reshape(-1, 2) - center
-            pts2 = pts2.reshape(-1, 2) - center
+
+        pts1 = pts1.reshape(-1, 2)
+        pts2 = pts2.reshape(-1, 2)
+
+        # undo resize effect
+        pts1[:, 0] = pts1[:, 0] / self.resize_ratio_x
+        pts1[:, 1] = pts1[:, 1] / self.resize_ratio_y
+        pts2[:, 0] = pts2[:, 0] / self.resize_ratio_x
+        pts2[:, 1] = pts2[:, 1] / self.resize_ratio_y
+        # take center as origin
+        pts1 = pts1 - center
+        pts2 = pts2 - center
         matrix, _ = cv2.estimateAffinePartial2D(pts1, pts2, method=cv2.RANSAC)
         return matrix
 
     def update(self, curr_frame, dets):
-        if self.img_shape is None:
-            self.img_shape = curr_frame.shape[:2]
+        self.resize_ratio_x = curr_frame.shape[1] / self.img_shape[1]
+        self.resize_ratio_y = curr_frame.shape[0] / self.img_shape[0]
 
-        if self.resize_ratio < 1.0:
-            curr_frame = cv2.resize(curr_frame, dsize=None, fx=self.resize_ratio, fy=self.resize_ratio)
-            if (len(dets)):
-                org_dets = dets
-                dets = org_dets.copy()
-                dets[:, :4] = org_dets[:, :4] * self.resize_ratio
+        if (len(dets)):  # resize detection boxes
+            org_dets = dets
+            dets = org_dets.copy()
+            dets[:, 1] = org_dets[:, 1] * self.resize_ratio_x  # cx
+            dets[:, 1] = org_dets[:, 1] * self.resize_ratio_y  # cy
+            dets[:, 1] = org_dets[:, 1] * self.resize_ratio_x  # w
+            dets[:, 1] = org_dets[:, 1] * self.resize_ratio_y  # h
 
-        curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
+        if len(curr_frame.shape) == 3:  # colorful bgr
+            curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
+        elif len(curr_frame.shape) == 2:  # gray already
+            curr_gray = curr_frame
+        else:
+            raise ValueError("something wrong")
         mask = self._get_mask_by_detection(curr_gray, dets)
 
         if self.prev_gray is None:   # first frame
@@ -150,6 +167,13 @@ class UnifiedCMC:
             A = self._estimate_rigid_transform_from_points(good_prev, good_curr)
             if A is None:
                 A = np.eye(2, 3)
+
+        # if good_curr is None or len(good_curr) < self.min_features:
+        #     print("extract")
+        #     self.prev_pts = self._get_sparse_points(curr_gray, mask)
+        # else:
+        #     print("reuse")
+        #     self.prev_pts = good_curr.reshape(-1, 1, 2)
 
         self.prev_pts = self._get_sparse_points(curr_gray, mask)
         self.prev_gray = curr_gray
@@ -255,7 +279,7 @@ class UnifiedCMC:
         H, W = image.shape[:2]
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
-        thickness = 1
+        thickness = 2
         line_height = 18
 
         # Convert info to display strings
@@ -274,6 +298,8 @@ class UnifiedCMC:
 
         return image  # Optional: return it if you want to chain ops
 
+    def set_img_shape(self, img_shape):
+        self.img_shape = img_shape
 
 
 if __name__ == "__main__":
@@ -288,8 +314,8 @@ if __name__ == "__main__":
 
     predictor = YoloPredictor()
     # cmc = UnifiedCMC(min_features=80, method='orb')
-    cmc = UnifiedCMC(min_features=30, method='optflow', resize_ratio=0.25)
-
+    cmc = UnifiedCMC(min_features=30, method='optflow', img_shape=None)
+    CMC_RESIZE_RATIO = 0.3
     np.set_printoptions(precision=3, suppress=True)
 
     vis_dir = Path("vis_cmc")
@@ -303,8 +329,13 @@ if __name__ == "__main__":
     img_num = len(img_paths)
     for j, img_path in tqdm(enumerate(img_paths), total=img_num):
         img = cv2.imread(str(img_path))
+        cmc.set_img_shape(img.shape[:2]) 
+
+        img_for_cmc = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        img_for_cmc = cv2.resize(img_for_cmc, None, fx=CMC_RESIZE_RATIO, fy=CMC_RESIZE_RATIO)
+
         dets = predictor.predict(img)
-        curr_affine_matrix = cmc.update(img, dets)
+        curr_affine_matrix = cmc.update(img_for_cmc, dets)
 
         global_dets = cmc.local_to_global(dets)
         local_dets = cmc.global_to_local(global_dets)

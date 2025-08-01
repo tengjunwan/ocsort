@@ -13,6 +13,7 @@ USE_MY_HUNGARIAN = True
 if USE_MY_HUNGARIAN:
     from hungarian_algorithm import hungarian_rect
 
+
 def cxcywh2xyxy(boxes):
     x1y1x2y2 = np.zeros_like(boxes)
     x1y1x2y2[:, 0] = boxes[:, 0] - boxes[:, 2] / 2  # x1 = cx - w/2
@@ -320,13 +321,15 @@ class OCSort(object):
         KalmanFilterBoxTracker.count = 0
 
 
-    def update(self, yolo_dets, det_feats, debug_mode=False):
+    def update(self, yolo_dets, det_feats, det_feats_mask, debug_mode=False):
         """
         Args:
             yolo_dets (numpy.ndarray): 
                 shape (#det, 5), 5 means cx, cy, w, h, score; 
             det_feats (numpy.ndarray):
                 shape (#det, feat_dim), appearance embeddings of detections;
+            det_feats_mask (numpy.ndarray, bool):
+                shape (#det, feat_dim), indicate vailidation appearance embeddings of detections;
 
         return:
             yolo_dets_with_id (numpy.ndarray):
@@ -337,7 +340,6 @@ class OCSort(object):
                 "predict_bbox": [],  # (#trks, 5), cx, cy, w, h, id
                 "v_directions": [],  # (#trks, 5), cx, cy, vx(normalized), vy(normalized), id
                 "v_kalmanfilter": [],  # (trks, 5), cx, cy, vx, vy, id
-                "last_observed_zs": [],  # (#trks, 5), cx, cy, w, h, id
                 "previous_obs": [],  # (#trks, 3), cx, cy, id
                 "first_round_assign": [],  # (#num, 5), cx, cy, w, h, id
                 "second_round_assign": [],  # (#num, 5), cx, cy, w, h, id
@@ -359,6 +361,8 @@ class OCSort(object):
         dets_second = yolo_dets[mid_conf_mask]     # (#dets, 5), Used for BYTE-style secondary matching
         det_feats_high = det_feats[high_conf_mask]
         det_feats_second = det_feats[mid_conf_mask]
+        det_feats_mask_high = det_feats_mask[high_conf_mask]
+        det_feats_mask_second = det_feats_mask[mid_conf_mask]
 
         # get predicted locations of existing trackers
         trks = np.zeros((len(self.trackers), 5), dtype=np.float32)  # (#trks, 4), cx, cy, w, h, id
@@ -372,7 +376,10 @@ class OCSort(object):
         # get appearnce of existing trackers
         trk_feats = np.zeros((len(self.trackers), self.feat_dim), dtype=np.float32)  # (#trks, feat_dim), unnormalized
         for i in range(len(self.trackers)):
-            trk_feats[i] = self.trackers[i].get_appearance()
+            app = self.trackers[i].get_appearance()
+            if app is None:  # not seen yet due to ReID strategy
+                app = np.zeros(self.feat_dim, dtype=np.float32)
+            trk_feats[i] = app
 
         # get velocity directions of existing trackers
         v_directions = np.zeros((len(self.trackers), 2), dtype=np.float32)
@@ -382,20 +389,6 @@ class OCSort(object):
                 vx, vy = v_directions[i]
                 cx, cy, w, h, id = self.trackers[i].get_state_with_id()
                 debug_info["v_directions"].append(np.array([cx, cy, vx, vy, id], dtype=np.float32))
-
-        # get last observation for OCR mentioned in OCSORT paper for OCR 
-        last_observed_zs= np.zeros((len(self.trackers), 4), dtype=np.float32)
-        for i in range(len(self.trackers)):
-            last_z = self.trackers[i].get_last_observed_z()  
-            if last_z is None:
-                last_observed_zs[i] = np.array([-10, -10, 0, 0])  # won't overlap with any det
-            else:
-                last_observed_zs[i] = last_z  # (cx, cy, w, h)
-            if debug_mode:
-                cx, cy, w, h = last_observed_zs[i]
-                id = self.trackers[i].id
-                debug_info["last_observed_zs"].append(np.array([cx, cy, w, h, id], 
-                                                               dtype=np.float32))
         
         # get previous obersavetion for estimating velocity directions
         previous_obs = np.zeros((len(self.trackers), 2), dtype=np.float32)
@@ -434,48 +427,14 @@ class OCSort(object):
 
         for det_idx, trk_idx in matched:   # update trackers by matched detection immediately
             self.trackers[trk_idx].update(dets_high[det_idx, :4])  # update location
-            self.trackers[trk_idx].update_appearance(det_feats_high[det_idx], dets_high[det_idx, 4])  # update appearance
+            if det_feats_mask_high[det_idx]:
+                self.trackers[trk_idx].update_appearance(det_feats_high[det_idx], dets_high[det_idx, 4])  # update appearance
 
             if debug_mode:
                 cx, cy, w, h = dets_high[det_idx, :4]
                 id = self.trackers[trk_idx].id
                 debug_info["first_round_assign"].append(np.array([cx, cy, w, h, id], 
                                                    dtype=np.float32))
-        
-        # # second round of bytetrack: iou (optional: left trackers + low score detections)
-        # if self.use_byte and len(dets_second) > 0 and unmatched_trks.shape[0] > 0:
-        #     left_trks = trks[unmatched_trks]
-        #     left_trks_buffered = buffer_bbox(left_trks, 0)
-        #     dets_second_buffered = buffer_bbox(dets_second[:, :4], 0)
-        #     byte_iou_matrix = iou_batch(dets_second_buffered, left_trks_buffered)  # (#dets_sec, #trks_left)
-        #     byte_matched = linear_assignment(-byte_iou_matrix)
-        #     # filter out matching with low iou
-        #     to_remove_trk_idx = []
-        #     final_byte_matched = []  # satisfy iou threshold
-        #     for det_idx_in_sec, trk_idx_in_left in byte_matched:
-        #         if byte_iou_matrix[det_idx_in_sec, trk_idx_in_left] < self.first_round_match_iou_threshold:
-        #             continue
-        #         final_byte_matched.append([det_idx_in_sec, trk_idx_in_left])
-        #         trk_idx = unmatched_trks[trk_idx_in_left]
-        #         self.trackers[trk_idx].update(dets_second[det_idx_in_sec, :4])  # update location
-        #         self.trackers[trk_idx].update_appearance(det_feats_second[det_idx_in_sec],  # update appereance
-        #                                                  dets_second[det_idx_in_sec, 4])
-
-        #         to_remove_trk_idx.append(trk_idx)  # remove unmatched trackers id
-
-        #         if debug_mode:
-        #             cx, cy, w, h = dets_second[det_idx_in_sec, :4]  
-        #             id = self.trackers[trk_idx].id
-        #             debug_info["second_round_assign"].append(np.array([cx, cy, w, h, id], 
-        #                                            dtype=np.float32))
-                    
-        #     final_byte_matched = np.array(final_byte_matched)  # for debug
-
-        #     unmatched_trks = np.setdiff1d(unmatched_trks, np.array(to_remove_trk_idx))
-
-        #     if self.verbose:
-        #         print(f"======second round match({self.frame_count}-th frame)======")
-        #         print(f"matched num: {len(final_byte_matched)}")
 
         # second round of bytetrack: iou + appearance + velocity (left trackers + low score detections)
         if self.use_byte and len(dets_second) > 0 and unmatched_trks.shape[0] > 0:
@@ -493,8 +452,9 @@ class OCSort(object):
             for det_idx_in_sec, trk_idx_in_left in matched_in_left:
                 trk_idx = unmatched_trks[trk_idx_in_left]
                 self.trackers[trk_idx].update(dets_second[det_idx_in_sec, :4])  # update location
-                self.trackers[trk_idx].update_appearance(det_feats_second[det_idx_in_sec],  # update appereance
-                                                         dets_second[det_idx_in_sec, 4])
+                if det_feats_mask_second[det_idx_in_sec]:
+                    self.trackers[trk_idx].update_appearance(det_feats_second[det_idx_in_sec],  # update appereance
+                                                            dets_second[det_idx_in_sec, 4])
 
                 if debug_mode:
                     cx, cy, w, h = dets_second[det_idx_in_sec, :4]  
@@ -508,42 +468,6 @@ class OCSort(object):
             if self.verbose:
                 print(f"======second round match({self.frame_count}-th frame)======")
                 print(f"matched num: {len(matched_in_left)}")
-
-        # third round of ocsort(OCR): iou (last observation of left trackers + left high score detections)
-        # if unmatched_dets.shape[0] > 0 and unmatched_trks.shape[0] > 0:
-        #     left_trks = last_observed_zs[unmatched_trks]
-        #     left_dets_high = dets_high[unmatched_dets]
-        #     ocr_iou = iou_batch(left_dets_high[:, :4], left_trks) 
-        #     ocr_matched = linear_assignment(-ocr_iou)
-        #     to_remove_det_idx = []
-        #     to_remove_trk_idx = []
-        #     final_ocr_matched = []
-        #     for det_idx_in_left, trk_idx_in_left in ocr_matched:
-        #         if ocr_iou[det_idx_in_left, trk_idx_in_left] < self.iou_threshold:
-        #             continue
-        #         final_ocr_matched.append([det_idx_in_left, trk_idx_in_left])
-        #         det_idx = unmatched_dets[det_idx_in_left]
-        #         trk_idx = unmatched_trks[trk_idx_in_left]
-        #         self.trackers[trk_idx].update(dets_high[det_idx, :4])  # update location
-        #         self.trackers[trk_idx].update_appearance(det_feats_high[det_idx], dets_high[det_idx, 4])  # update appereance
-
-
-        #         if debug_mode:
-        #             cx, cy, w, h = dets_high[det_idx, :4]
-        #             id = self.trackers[trk_idx].id
-        #             debug_info["third_round_assign"].append(np.array([cx, cy, w, h, id], 
-        #                                            dtype=np.float32))
-
-        #         to_remove_det_idx.append(det_idx)
-        #         to_remove_trk_idx.append(trk_idx)
-        #     unmatched_dets = np.setdiff1d(unmatched_dets, np.array([to_remove_det_idx]))
-        #     unmatched_trks = np.setdiff1d(unmatched_trks, np.array([to_remove_trk_idx]))
-
-        #     final_ocr_matched = np.array(final_ocr_matched)  # for debug
-        #     if self.verbose:
-        #         print(f"======third round match({self.frame_count}-th frame)======")
-        #         print(f"matched num: {len(final_ocr_matched)}")
-        #         print(f"match: {final_ocr_matched}")
                 
         # third round: my version: buffered IoU + velocity direction + appearance
         if unmatched_dets.shape[0] > 0 and unmatched_trks.shape[0] > 0:
@@ -564,7 +488,8 @@ class OCSort(object):
                 det_idx = unmatched_dets[det_idx_in_left]
                 trk_idx = unmatched_trks[trk_idx_in_left]
                 self.trackers[trk_idx].update(dets_high[det_idx, :4])  # update location
-                self.trackers[trk_idx].update_appearance(det_feats_high[det_idx], dets_high[det_idx, 4])  # update appearance
+                if det_feats_mask_high[det_idx]:
+                    self.trackers[trk_idx].update_appearance(det_feats_high[det_idx], dets_high[det_idx, 4])  # update appearance
                 if debug_mode:
                     cx, cy, w, h = dets_high[det_idx, :4]
                     id = self.trackers[trk_idx].id
@@ -611,6 +536,8 @@ class OCSort(object):
                 iou_with_trks = iou_batch(np.array([[cx, cy, w, h]]), trks[:, :4])  # do not create track by unassigned detection due to low appearance similarity(parital occluded)
                 if np.max(iou_with_trks) > self.create_new_track_iou_thresh:
                     continue
+            if not det_feats_mask_high[det_idx]:  # no appearance embedding 
+                continue
             new_tracker = KalmanFilterBoxTracker(cx, cy, w, h, self.delta_t)
             new_tracker.update_appearance(det_feats_high[det_idx], dets_high[det_idx, 4])
             self.trackers.append(new_tracker)
@@ -649,7 +576,7 @@ if __name__ == "__main__":
     import cv2
     import yaml
 
-    from inference_onnx import YoloPredictor
+    from object_detect import YoloPredictor
 
     # CONFIG_FILE = './my_script/ocsort_config.yaml'
     # with open(CONFIG_FILE, 'r') as file:

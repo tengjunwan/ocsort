@@ -70,17 +70,13 @@ class KalmanFilterBoxTrackerNoMatrix():
         self.update_det_score = 0.0
         self.update_simiarity = 1
 
-
-
-
-
     def predict(self, is_virtual=False):
         # update age 
         if not is_virtual:
             self.age = self.age + 1
 
         # area is forced to be non-negative
-        min_area = 400  # 20*20 pixels
+        min_area = 215  # 15*15 pixels
         if((self.x[6]+self.x[2]) <= min_area):
             self.x[6] *= 0.0
 
@@ -188,7 +184,7 @@ class KalmanFilterBoxTrackerNoMatrix():
         if z is None:
             self.consecutive_missed_frames += 1 
             self.consecutive_hits = 0
-            self.is_occluded = True
+            self.is_shape_deviated = True
             if self.observed:  # first time not observed
                 # save last observation for oru
                 self.last_observed_age = self.age - 1  # age +1 in predict phase
@@ -222,11 +218,11 @@ class KalmanFilterBoxTrackerNoMatrix():
             self.last_z_buffer.append(z)  # update last z buffer
 
         # check if z deviates from canonical shape
-        self.is_occluded = False
+        self.is_shape_deviated = False
         if not is_virtual:
             s = z[2, 0]
             r = z[3, 0]
-            self.is_occluded = self._check_occlusion(s, r)
+            self.is_shape_deviated = self._check_shape_deviation(s, r)
             self._update_canonical_shape(s, r)
 
 
@@ -253,9 +249,10 @@ class KalmanFilterBoxTrackerNoMatrix():
             self.P_post[i+4,i] = self.P_post[i,i+4]
 
         # only update position(cx, cy) if shape is deviated(e.g. partial detection due to occlusion)
-        if self.is_occluded:
+        if self.is_shape_deviated:
             for i in range(2, 7):  # s, r, vx, vy, vs
                 self.x_post[i,0] = self.x[i,0]
+                
         
         
         self.x = self.x_post.copy()
@@ -288,13 +285,13 @@ class KalmanFilterBoxTrackerNoMatrix():
         cxcywh = np.array([cx, cy, w, h], dtype=np.float32).reshape(shape)
         return cxcywh
     
-    def _check_occlusion(self, s, r):
+    def _check_shape_deviation(self, s, r):
         canonical_w = np.sqrt(self.canonical_s * self.canonical_r)
         canonical_h = self.canonical_s / (canonical_w + 1e-6)
         w = np.sqrt(s * r)
         h = s / (w + 1e-6)
-        w_diff = (canonical_w - w) / (canonical_w + 1e-6)
-        h_diff = (canonical_h - h) / (canonical_h + 1e-6)
+        w_diff = abs(canonical_w - w) / (canonical_w + 1e-6)
+        h_diff = abs(canonical_h - h) / (canonical_h + 1e-6)
         shape_diff = max(w_diff, h_diff)
 
         # if s_diff > self.s_diff_thresh or r_diff > self.r_diff_thresh:
@@ -353,7 +350,6 @@ class KalmanFilterBoxTrackerNoMatrix():
 
     def get_appearance(self):
         return self.feat
-    
     
     def _cal_cos_similarity(self, feat1, feat2):
         # Compute cosine similarity

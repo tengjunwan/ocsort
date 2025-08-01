@@ -42,8 +42,22 @@ ReID:
   input_size: 128
   feat_dim: 128
 
+EfficientReIDStrategy:
+  maximum_num_per_frame: 4  # maximum number for each frame
+  iou_threshold: 0.3
+  det_thresh: 0.7
+  
+CMC:
+  min_features: 30
+  method: "optflow"  # "optflow" or "orb"
+  
   
 EXP:
   # img_foler: "imgs/screen-20250422-150828_seg_2"
-  img_foler: "test_imgs/DJI_20250606154644_0003_V/DJI_20250606154644_0003_V_silver_car"
+  img_foler: "test_frame/frame_org_882be656fc94dade_1747721858000_gray_suv"
   resize_ratio: 1.0
+  use_cmc: True
+  delayed_update: False
+  use_efficient_strategy: True
+
+

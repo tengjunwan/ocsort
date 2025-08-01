@@ -95,62 +95,24 @@ class YoloPredictor():
         return np.array(results)
         
 
-class ReID():
-    """a REID model for calculating cosine similarity"""
 
-    def __init__(self, onnx_path="my_script/fastreid_model.onnx", feat_dim=128, input_size=128):
-        self.onnx_path = onnx_path
-        self.input_size = input_size
-        self.feat_dim = feat_dim
-        self.session = onnxruntime.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
-        self.input_name = self.session.get_inputs()[0].name
-        self.output_name = self.session.get_outputs()[0].name
-
-    def embed(self, img):
-        # preprocess
-        resize_img = cv2.resize(img, (self.input_size, self.input_size))
-        input_img = resize_img[:, :, ::-1]  # BGR to RGB
-        input_img = input_img.astype(np.float32) 
-        input_img = input_img.transpose(2, 0, 1)  # HWC to CHW
-        input_img = np.expand_dims(input_img, axis=0)  # add batch dimension (1,3,H,W)
-
-        # inference
-        output = self.session.run([self.output_name], {self.input_name: input_img})[0]  # (1, feat_num)
-        output = np.squeeze(output)
-        
-        return output
 
 
 if __name__ == "__main__":
-    # predictor = YoloPredictor()
-    # img = cv2.imread("imgs/frame_yuv/00000169.jpg")
-    # results = predictor.predict(img)
-    # img_vis = img.copy()
-    # for cx, cy, w, h, score in results:
-    #     x1 = int(cx - 0.5 * w)
-    #     y1 = int(cy - 0.5 * h)
-    #     x2 = int(cx + 0.5 * w)
-    #     y2 = int(cy + 0.5 * h)
-    #     cv2.rectangle(img_vis, (x1, y1), (x2, y2), (0,0,255), 2)
-    #     label = f" {score:.2f}"
-    #     cv2.putText(img_vis, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+    predictor = YoloPredictor()
+    img = cv2.imread("imgs/frame_yuv/00000169.jpg")
+    results = predictor.predict(img)
+    img_vis = img.copy()
+    for cx, cy, w, h, score in results:
+        x1 = int(cx - 0.5 * w)
+        y1 = int(cy - 0.5 * h)
+        x2 = int(cx + 0.5 * w)
+        y2 = int(cy + 0.5 * h)
+        cv2.rectangle(img_vis, (x1, y1), (x2, y2), (0,0,255), 2)
+        label = f" {score:.2f}"
+        cv2.putText(img_vis, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
     
-    # cv2.imwrite("result.jpg", img_vis)
+    cv2.imwrite("result.jpg", img_vis)
 
 
-    embedder = ReID()
-    img1 = cv2.imread("imgs/vis_id/2.jpg")
-    feat1 = embedder.embed(img1)
-    img2 = cv2.imread("imgs/vis_id/27.jpg")
-    feat2 = embedder.embed(img2)
-    img3 = cv2.imread("imgs/vis_id/609.jpg")
-    feat3 = embedder.embed(img3)
-    img4 = cv2.imread("imgs/vis_id/610.jpg")
-    feat4 = embedder.embed(img4)
-
-    cos_sim = np.dot(feat1, feat2) / (np.linalg.norm(feat1) * np.linalg.norm(feat2))
-    print(f"similarity score: {cos_sim:.2f}")
-
-    cos_sim = np.dot(feat3, feat4) / (np.linalg.norm(feat3) * np.linalg.norm(feat4))
-    print(f"similarity score: {cos_sim:.2f}")
-    print("done")
+    
