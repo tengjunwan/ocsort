@@ -1,8 +1,7 @@
 from collections import deque
 
 import numpy as np
-
-
+from utils import exp_saturate_by_age
 
 
 class KalmanFilterBoxTrackerNoMatrix():
@@ -222,16 +221,13 @@ class KalmanFilterBoxTrackerNoMatrix():
         if not is_virtual:
             s = z[2, 0]
             r = z[3, 0]
-            self.is_shape_deviated = self._check_shape_deviation(s, r)
             self._update_canonical_shape(s, r)
-
+            self.is_shape_deviated = self._check_shape_deviation(s, r)
 
         # normal correct(update) phase
         Q = self.Q
         x = self.x
         P = self.P
-
-        
 
         # Mean
         for i in range(4):  # x, y, s, r
@@ -301,10 +297,21 @@ class KalmanFilterBoxTrackerNoMatrix():
         else:
             return False
 
+    def _get_dynamic_shape_update_coeff(self):
+        min_shape_update_coeff = 0.1
+        max_shape_update_coeff = self.shape_update_coeff
+        tau = 10.0  # saturate frame ≈ 30
+        dynamic_shape_update_coeff = exp_saturate_by_age(self.age, min_shape_update_coeff, max_shape_update_coeff, tau)
+        return dynamic_shape_update_coeff
+
+
         
     def _update_canonical_shape(self, s, r):
-        self.canonical_s = self.canonical_s * self.shape_update_coeff + s * (1 - self.shape_update_coeff)
-        self.canonical_r = self.canonical_r * self.shape_update_coeff + r * (1 - self.shape_update_coeff)
+        # self.canonical_s = self.canonical_s * self.shape_update_coeff + s * (1 - self.shape_update_coeff)
+        # self.canonical_r = self.canonical_r * self.shape_update_coeff + r * (1 - self.shape_update_coeff)
+        dynamic_shape_update_coeff = self._get_dynamic_shape_update_coeff()
+        self.canonical_s = self.canonical_s * dynamic_shape_update_coeff + s * (1 - dynamic_shape_update_coeff)
+        self.canonical_r = self.canonical_r * dynamic_shape_update_coeff + r * (1 - dynamic_shape_update_coeff)
 
     def update_appearance(self, feat, det_score):
         # first update, no matter what det_score is, it's a useful start

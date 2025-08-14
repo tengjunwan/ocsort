@@ -8,26 +8,40 @@ OCSort:
   use_byte: True
   low_det_thresh: 0.3
   max_track_num: 60
-  create_new_track_det_thresh: 0.8
-  create_new_track_iou_thresh: 0.3
+  create_new_track_det_thresh: 0.65
+  create_new_track_det_thresh_stricter: 0.85
+  create_new_track_iou_thresh_stricter: 0.3
+  buffer_ratio_speed: 80
+ 
+
+
   # first round priority(with high confident detection): location > appearance 
   first_round_buffer_ratio: 0.2
   first_round_match_iou_threshold: 0.3
+  first_round_match_v_dir_weight: 0.2
+  first_round_match_v_dir_cos_threshold: -1.1  # no requirement at all
   first_round_match_app_threshold: -0.0
-  first_round_match_app_weight: 0.0
+  first_round_match_app_weight: 0.1
   first_round_match_app_epsilon: 0.5
+ 
   # second round priority(with low confident detection): location > appearance 
   second_round_buffer_ratio: 0.2
   second_round_match_iou_threshold: 0.3
+  second_round_match_v_dir_weight: 0.2
+  second_round_match_v_dir_cos_threshold: -1.1  # no requirement at all
   second_round_match_app_threshold: -0.3
-  second_round_match_app_weight: 0.0
+  second_round_match_app_weight: 0.1
   second_round_match_app_epsilon: 0.5
+
   # third round priority(with high confident detection): appearance > location
-  third_round_buffer_ratio: 0.5
+  third_round_buffer_ratio: 2.0
   third_round_match_iou_threshold: 0.01
+  third_round_match_v_dir_weight: 0.2
+  third_round_match_v_dir_cos_threshold: 0.5  # 60 degrees
   third_round_match_app_threshold: 0.4
-  third_round_match_app_weight: 0.5
+  third_round_match_app_weight: 1.0
   third_round_match_app_epsilon: 0.5
+
   verbose: True
 
 YOLO:
@@ -38,7 +52,7 @@ YOLO:
   min_h: 10
 
 ReID:
-  onnx_path: "my_script/fastreid_model.onnx"
+  onnx_path: "my_script/fastreid_model_b1_s128.onnx"
   input_size: 128
   feat_dim: 128
 
@@ -54,7 +68,7 @@ CMC:
   
 EXP:
   # img_foler: "imgs/screen-20250422-150828_seg_2"
-  img_foler: "test_frame/frame_org_882be656fc94dade_1747721858000_gray_suv"
+  img_foler: "test_imgs/screen-20250422-150828/screen-20250422-150828_black_car"
   resize_ratio: 1.0
   use_cmc: True
   delayed_update: False

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from object_detect import YoloPredictor
 from appearance_embed import ReID, EfficientReIDStrategy
 from oc_sort import OCSort
-from oc_sort import appereance_batch
+from utils import appearance_batch, exp_saturate_by_age
 from camera_motion_compensate import UnifiedCMC
 
 
@@ -113,7 +113,7 @@ for i, img_path in enumerate(img_paths):
     #     continue
     
     img_id = int(img_path.stem)
-    if img_id == 285:
+    if img_id == 403:
         print("debug")
     print(f"processing {i+1}/{num_images} img: {img_path}")
 
@@ -166,6 +166,13 @@ for i, img_path in enumerate(img_paths):
         rtn_tracks, debug_info = tracker.update(global_det_results, det_feats, def_feats_mask, debug_mode)
     else:
         rtn_tracks = tracker.update(global_det_results, det_feats, def_feats_mask, debug_mode)
+
+    # set target id
+    target_awareness = True
+    if target_awareness:
+        targit_id = None
+        tracker.set_target(targit_id)
+
 
     # camera motion compensation(global to local)
     if use_cmc:
@@ -258,7 +265,20 @@ for i, img_path in enumerate(img_paths):
         cv2.putText(img_vis_trk, label, (x1, y2 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                     0.5, color, 2)
         
+        # draw search range(buffered box)
+        missed_frames = trk.missed_frames
+        if missed_frames != 0:
+            buffer_ratio = exp_saturate_by_age(missed_frames, 0.2, tracker.third_round_buffer_ratio, config["OCSort"]["buffer_ratio_speed"])
+            buffer_w = (1 + 2 * buffer_ratio) * trk.w
+            buffer_h = (1 + 2 * buffer_ratio) * trk.h
 
+            x1 = int(trk.cx - 0.5 * buffer_w)
+            y1 = int(trk.cy - 0.5 * buffer_h)
+            x2 = int(trk.cx + 0.5 * buffer_w)
+            y2 = int(trk.cy + 0.5 * buffer_h)
+
+            color = get_color(id, less_saturate=True)
+            cv2.rectangle(img_vis_trk, (x1, y1), (x2, y2), color, 1)
 
         
         # draw occlusion info
@@ -291,7 +311,7 @@ for i, img_path in enumerate(img_paths):
     #     trk_ids.append(tracker.trackers[i].id)
 
     
-    # app_matrix = appereance_batch(det_feats, trk_feats)
+    # app_matrix = appearance_batch(det_feats, trk_feats)
     # app_vis_save_path = debug_app_matrix / img_path.name
     # save_app_matrix_heatmap(app_matrix, trk_ids, str(app_vis_save_path))
 
