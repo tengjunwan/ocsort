@@ -113,7 +113,7 @@ for i, img_path in enumerate(img_paths):
     #     continue
     
     img_id = int(img_path.stem)
-    if img_id == 403:
+    if img_id == 178:
         print("debug")
     print(f"processing {i+1}/{num_images} img: {img_path}")
 
@@ -121,10 +121,6 @@ for i, img_path in enumerate(img_paths):
     img = cv2.imread(img_path)
     if resize_ratio < 0.9 or resize_ratio > 1.1:
         img = cv2.resize(img, dsize=(0, 0), fx=resize_ratio, fy=resize_ratio)
-
-
-    if use_cmc and cmc.img_shape is None:
-        cmc.set_img_shape(img.shape[:2])
 
     # detect(YOLO)
     det_results = predictor.predict(img)
@@ -141,7 +137,7 @@ for i, img_path in enumerate(img_paths):
     # do embedding
     det_feats = np.zeros((len(det_results), embedder.feat_dim), dtype=np.float32)
     def_feats_mask = np.zeros(len(det_results), dtype=bool)  
-    for i, (cx, cy, w, h, score) in enumerate(det_results):
+    for i, (cx, cy, w, h, score, cls_id) in enumerate(det_results):
         if i in selective_det_idx:
             x1 = max(int(cx - 0.5 * w), 0)
             y1 = max(int(cy - 0.5 * h), 0)
@@ -157,8 +153,8 @@ for i, img_path in enumerate(img_paths):
         global_det_results = cmc.local_to_global(det_results)
     else:
         global_det_results = det_results
-        
 
+    
 
     # track
     debug_mode = True
@@ -170,7 +166,7 @@ for i, img_path in enumerate(img_paths):
     # set target id
     target_awareness = True
     if target_awareness:
-        targit_id = None
+        targit_id = 4
         tracker.set_target(targit_id)
 
 
@@ -209,7 +205,7 @@ for i, img_path in enumerate(img_paths):
     img_vis_trk = cmc.draw_camera_info(img_vis_trk)
 
     # draw detect result
-    for i, (cx, cy, w, h, score) in enumerate(det_results):
+    for i, (cx, cy, w, h, score, cls_id) in enumerate(det_results):
         if i in selective_det_idx:
             embedded = True
         else:
@@ -268,7 +264,7 @@ for i, img_path in enumerate(img_paths):
         # draw search range(buffered box)
         missed_frames = trk.missed_frames
         if missed_frames != 0:
-            buffer_ratio = exp_saturate_by_age(missed_frames, 0.2, tracker.third_round_buffer_ratio, config["OCSort"]["buffer_ratio_speed"])
+            buffer_ratio = exp_saturate_by_age(missed_frames, 0.2, tracker.third_round_buffer_ratio, tracker.third_round_buffer_speed)
             buffer_w = (1 + 2 * buffer_ratio) * trk.w
             buffer_h = (1 + 2 * buffer_ratio) * trk.h
 

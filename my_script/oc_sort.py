@@ -83,36 +83,35 @@ class OCSort(object):
     """
     def __init__(self, det_thresh=0.7, max_age=60, min_hits=3, 
         # 1st round association para
-        first_round_buffer_ratio = 0.2, 
+        first_round_buffer_ratio=0.2, 
+        first_round_buffer_speed=5.0,
         first_round_match_iou_threshold=0.3, 
         first_round_match_v_dir_weight=0.2,
         first_round_match_v_dir_cos_threshold=-0.5, 
         first_round_match_app_threshold=0.5, 
         first_round_match_app_weight=0.2, 
-        first_round_match_app_epsilon=0.5,
         # 2nd round association para
-        second_round_buffer_ratio = 0.2, 
+        second_round_buffer_ratio=0.2, 
+        second_round_buffer_speed=5.0,
         second_round_match_iou_threshold=0.3, 
         second_round_match_v_dir_weight=0.2,
         second_round_match_v_dir_cos_threshold=-0.5,
         second_round_match_app_threshold=0.0, 
         second_round_match_app_weight=0.0, 
-        second_round_match_app_epsilon=0.5,
         # 3rd round association para
-        third_round_buffer_ratio = 1.0, 
+        third_round_buffer_ratio=1.0, 
+        third_round_buffer_speed=80.0,
         third_round_match_iou_threshold=0.01,
         third_round_match_v_dir_weight=0.2,
         third_round_match_v_dir_cos_threshold=0.0,
         third_round_match_app_threshold=0.9, 
         third_round_match_app_weight=1.0, 
-        third_round_match_app_epsilon=0.5,
 
         delta_t=3, use_byte=True, low_det_thresh=0.2, max_track_num=40, 
         # create new track 
         create_new_track_det_thresh=0.65,
         create_new_track_det_thresh_stricter=0.8,
         create_new_track_iou_thresh_stricter=0.3,
-        buffer_ratio_speed=80,
         feat_dim=128, verbose=False, 
         **kwargs):
         """
@@ -120,14 +119,15 @@ class OCSort(object):
         """
         self.max_age = max_age
         self.min_hits = min_hits
+
         # first round priority(with high confident detection): location > appearance 
         self.first_round_buffer_ratio = first_round_buffer_ratio
+        self.first_round_buffer_speed = first_round_buffer_speed
         self.first_round_match_iou_threshold = first_round_match_iou_threshold
         self.first_round_match_v_dir_weight = first_round_match_v_dir_weight
         self.first_round_match_v_dir_cos_threshold = first_round_match_v_dir_cos_threshold
         self.first_round_match_app_threshold = first_round_match_app_threshold
         self.first_round_match_app_weight = first_round_match_app_weight
-        self.first_round_match_app_epsilon = first_round_match_app_epsilon
 
         # second round priority(with low confident detection): location > appearance 
         self.second_round_buffer_ratio = second_round_buffer_ratio
@@ -136,16 +136,16 @@ class OCSort(object):
         self.second_round_match_v_dir_cos_threshold = second_round_match_v_dir_cos_threshold
         self.second_round_match_app_threshold = second_round_match_app_threshold
         self.second_round_match_app_weight = second_round_match_app_weight
-        self.second_round_match_app_epsilon = second_round_match_app_epsilon
+        self.second_round_buffer_speed = second_round_buffer_speed
         
         # third round priority(with high confident detection): appearance > location
         self.third_round_buffer_ratio = third_round_buffer_ratio
+        self.third_round_buffer_speed = third_round_buffer_speed
         self.third_round_match_iou_threshold = third_round_match_iou_threshold
         self.third_round_match_v_dir_weight = third_round_match_v_dir_weight
         self.third_round_match_v_dir_cos_threshold = third_round_match_v_dir_cos_threshold
         self.third_round_match_app_threshold = third_round_match_app_threshold
         self.third_round_match_app_weight = third_round_match_app_weight
-        self.third_round_match_app_epsilon = third_round_match_app_epsilon
 
         self.trackers = []
         self.frame_count = 0
@@ -156,7 +156,6 @@ class OCSort(object):
         self.low_det_thresh = low_det_thresh
         self.max_track_num = max_track_num
         self.feat_dim = feat_dim
-        self.buffer_ratio_speed = buffer_ratio_speed
         self.verbose = verbose
 
         # create new track
@@ -196,8 +195,12 @@ class OCSort(object):
 
         self.frame_count += 1
 
+
         if yolo_dets is None or len(yolo_dets) == 0:  # (#det, 5)
             yolo_dets = yolo_dets.reshape(-1, 5)  # (0, 5)
+
+        if yolo_dets.shape[1] ==6:  # cx, cy, w, h, score, cls_id
+            yolo_dets = yolo_dets[:, :5]
             
         # filter detections by score
         scores = yolo_dets[:, 4]  # (#det)
@@ -216,7 +219,7 @@ class OCSort(object):
         trk_feats = np.zeros((len(self.trackers), self.feat_dim), dtype=np.float32)  # appearnces, (#trks, feat_dim), unnormalized
         v_directions = np.zeros((len(self.trackers), 2), dtype=np.float32)  # velocity directions, (#trks, 2), vx, vy, normalized or (0,0)
         previous_obs = np.zeros((len(self.trackers), 2), dtype=np.float32)  # previous observations, (#trks, 2), cx, cy
-        consecutive_missed_frames = np.zeros(len(self.trackers), dtype=np.int32)  # (#trks,)
+        consecutive_missed_frames = np.zeros(len(self.trackers), dtype=np.int32)  # for dynamic buffer ratio, (#trks,)
         self.target_exist = False
         for i in range(len(self.trackers)):
             # prediction locations
@@ -249,10 +252,15 @@ class OCSort(object):
 
     
         # 1st round association(trackers vs high score detections)
+        buffer_ratio = exp_saturate_by_age(
+            consecutive_missed_frames,  
+            vmin=0.0, 
+            vmax=self.first_round_buffer_ratio, 
+            tau=self.first_round_buffer_speed)
         matched, unmatched_dets, unmatched_trks = self.oc_associate(
-            dets_high, trks, self.first_round_match_iou_threshold, self.first_round_buffer_ratio,
+            dets_high, trks, self.first_round_match_iou_threshold, buffer_ratio,
             v_directions, previous_obs, self.first_round_match_v_dir_weight, self.first_round_match_v_dir_cos_threshold,
-            det_feats_high, trk_feats, self.first_round_match_app_weight, self.first_round_match_app_epsilon, self.first_round_match_app_threshold)
+            det_feats_high, trk_feats, self.first_round_match_app_weight, self.first_round_match_app_threshold)
 
         if self.verbose:
             print(f"======frist round match({self.frame_count}-th frame)======")
@@ -275,10 +283,20 @@ class OCSort(object):
             left_v_directions = v_directions[unmatched_trks]  # v direction
             left_previous_obs = previous_obs[unmatched_trks]  # v direction
             left_trk_feats = trk_feats[unmatched_trks]  # appearnce
+
+            # dynamic buffer ratio
+            left_consecutive_missed_frames = consecutive_missed_frames[unmatched_trks]
+            left_buffer_ratios = exp_saturate_by_age(
+                left_consecutive_missed_frames,  
+                vmin=0.0, 
+                vmax=self.second_round_buffer_ratio, 
+                tau=self.second_round_buffer_speed)
+            
+            # association
             matched_in_left, unmatched_dets_in_sec, unmatched_trks_in_left = self.oc_associate(
-                    dets_second, left_trks, self.second_round_match_iou_threshold, self.second_round_buffer_ratio,
+                    dets_second, left_trks, self.second_round_match_iou_threshold, left_buffer_ratios,
                     left_v_directions, left_previous_obs, self.second_round_match_v_dir_weight, self.second_round_match_v_dir_cos_threshold,
-                    det_feats_second, left_trk_feats, self.second_round_match_app_weight, self.second_round_match_app_epsilon, self.second_round_match_app_threshold
+                    det_feats_second, left_trk_feats, self.second_round_match_app_weight, self.second_round_match_app_threshold
                     )
             
             # update trackers by matched detection immediately
@@ -314,17 +332,17 @@ class OCSort(object):
             left_consecutive_missed_frames = consecutive_missed_frames[unmatched_trks]
 
             # choose dynamic buffer ratios according to missed frames
-            buffer_ratios = exp_saturate_by_age(
+            left_buffer_ratios = exp_saturate_by_age(
                 left_consecutive_missed_frames,  
                 vmin=0.2, 
                 vmax=self.third_round_buffer_ratio, 
-                tau=self.buffer_ratio_speed)
+                tau=self.third_round_buffer_speed)
 
 
             matched_in_left, unmatched_dets_in_left, unmatched_trks_in_left = self.oc_associate(
-                    left_dets_high, left_trks, self.third_round_match_iou_threshold, buffer_ratios,
+                    left_dets_high, left_trks, self.third_round_match_iou_threshold, left_buffer_ratios,
                     left_v_directions, left_previous_obs, self.third_round_match_v_dir_weight, self.third_round_match_v_dir_cos_threshold,
-                    left_det_feats_high, left_trk_feats, self.third_round_match_app_weight, self.third_round_match_app_epsilon, self.third_round_match_app_threshold
+                    left_det_feats_high, left_trk_feats, self.third_round_match_app_weight, self.third_round_match_app_threshold
                     )
             
             # update trackers by matched detection immediately
@@ -348,12 +366,8 @@ class OCSort(object):
                 print(f"======third round match({self.frame_count}-th frame)======")
                 print(f"matched num: {len(matched_in_left)}")
             
-
-
-
         for trk_idx in unmatched_trks:
             self.trackers[trk_idx].update(None)  # update unmatched trackers by None(no measurement)
-        
         
         # manage trackers
         num_trackers = len(self.trackers)
@@ -382,11 +396,10 @@ class OCSort(object):
                     self.target_consecutive_missed_frames,  
                     vmin=0.2, 
                     vmax=self.third_round_buffer_ratio, 
-                    tau=self.buffer_ratio_speed
+                    tau=self.third_round_buffer_speed
                     )
                 iou_with_target = iou_batch(np.array([[cx, cy, w, h]]), self.target_location.reshape(-1, 4), 0.0, buffer_ratio)[0, 0]
                 near_target = iou_with_target > 0.0001 
-
             
             if near_target:  # when near target, we create new tracklet by stricter standard
                 if score < self.create_new_track_det_thresh_stricter:
@@ -443,7 +456,7 @@ class OCSort(object):
     @staticmethod
     def oc_associate(detections, trackers, iou_threshold, buffer_ratio,  # locations
                  velocities, previous_obs, v_dir_weight, v_dir_cos_threshold,  # velocity direction
-                 det_feats, trk_feats, app_weight, app_epsilon, app_threshold):     # appearance
+                 det_feats, trk_feats, app_weight, app_threshold):     # appearance
         """
         Associates detections with trackers based on IoU and optional velocity difference cost.
     
@@ -453,6 +466,7 @@ class OCSort(object):
             trackers (numpy.ndarray): Predicted locations from a tracker (e.g., KalmanFilter),
                 shape = (num_trackers, 5), where each tracker is (cx, cy, w, h, id).
             iou_threshold (float): Minimum IoU required to associate a detection with a tracker.
+            buffer_ratio (numpy.ndarray or float): Buffer Prediction boxes of trackers.
             velocities (numpy.ndarray): Velocity vectors predicted by KalmanFilter,
                 shape = (num_trackers, 2), where each vector is (vx, vy).
             previous_obs (numpy.ndarray): Previous observations used to compute velocity differences,
@@ -464,8 +478,6 @@ class OCSort(object):
             trk_feats (numpy.ndarray): Appereance embeddings of trackers
                 shape = (num_trackers, feat_dim)
             app_weight (float): base weight for Apperance rewarding matrix
-            app_epsilon (float): cap the boost where there's a large difference in appearance in the first 
-                second best matches.
             app_threshold (float): Minimum appearance similarity to associate a detection with a tracker.
     
         Returns:

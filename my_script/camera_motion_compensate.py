@@ -3,7 +3,7 @@ import numpy as np
 
 
 class UnifiedCMC:
-    def __init__(self, min_features=30, method='orb', img_shape=(640, 640), **kwargs):
+    def __init__(self, min_features=30, method='orb', process_img_shape=(640, 640), ui_mask="", **kwargs):
         """
         Unified Camera Motion Compensation supporting ORB and Optical Flow
         method: 'orb' or 'optflow'
@@ -16,9 +16,11 @@ class UnifiedCMC:
         self.prev_pts = None  # For optical flow
         self.curr_affine_matrix = np.eye(3)
         self.cumu_affine_matrix = np.eye(3)
-        self.img_shape = None
-        self.resize_ratio_x = 1
-        self.resize_ratio_y = 1
+        self.process_img_shape = process_img_shape  # process image shape, (H, W), smaller for efficiency)
+
+        self.ori_img_shape = None  # original image shape, (H, W), set at runtime
+        self.resize_ratio_x = None  # process image W / original image W, calculate at runtime
+        self.resize_ratio_y = None  # process image H / original image H, calculate at runtime
 
         self.orb_config = {"orb_num": 1000}
         self.optflow_config = {"maxCorners": 50, 
@@ -27,10 +29,30 @@ class UnifiedCMC:
                                "winSize": (15, 15),
                                "maxLevel": 3
                                }
+        
+        # UI mask(for debug video recording samples)
+        self.ui_mask = None
+        if len(ui_mask):  # load image
+            try:
+                ui_mask_img = cv2.imread(ui_mask, cv2.IMREAD_GRAYSCALE)
+                ui_mask_img = cv2.resize(ui_mask_img, (self.process_img_shape[1], self.process_img_shape[0]),
+                                      interpolation=cv2.INTER_NEAREST)
+                self.ui_mask = (ui_mask_img > 127).astype(np.uint8)  
+            except:
+                print(f"failed to load ui mask:{ui_mask}")
+
 
     def _get_mask_by_detection(self, img, dets):
-        mask = np.ones((img.shape[0], img.shape[1]), dtype=np.uint8)
-        for cx, cy, w, h, _ in dets:
+        if self.ui_mask is None:
+            mask = np.ones((img.shape[0], img.shape[1]), dtype=np.uint8)
+        else:
+            if self.ui_mask.shape[0] != img.shape[0] or self.ui_mask.shape[1] != img.shape[1]:  # resize
+                mask = cv2.resize(self.ui_mask, (img.shape[1], img.shape[0]))
+                mask = (mask > 0.5).astype(np.uint8)
+            else:
+                mask = self.ui_mask
+        
+        for cx, cy, w, h in dets[:, :4]:
             x1 = max(int(cx - 0.5 * w), 0)
             y1 = max(int(cy - 0.5 * h), 0)
             x2 = min(int(cx + 0.5 * w), img.shape[1])
@@ -74,7 +96,7 @@ class UnifiedCMC:
                                        mask=mask)
 
     def _estimate_rigid_transform_from_points(self, pts1, pts2):
-        h, w = self.img_shape
+        h, w = self.ori_img_shape
         center = np.array([[w / 2, h / 2]])
 
         pts1 = pts1.reshape(-1, 2)
@@ -92,16 +114,14 @@ class UnifiedCMC:
         return matrix
 
     def update(self, curr_frame, dets):
-        self.resize_ratio_x = curr_frame.shape[1] / self.img_shape[1]
-        self.resize_ratio_y = curr_frame.shape[0] / self.img_shape[0]
-
-        if (len(dets)):  # resize detection boxes
-            org_dets = dets
-            dets = org_dets.copy()
-            dets[:, 1] = org_dets[:, 1] * self.resize_ratio_x  # cx
-            dets[:, 1] = org_dets[:, 1] * self.resize_ratio_y  # cy
-            dets[:, 1] = org_dets[:, 1] * self.resize_ratio_x  # w
-            dets[:, 1] = org_dets[:, 1] * self.resize_ratio_y  # h
+        """
+        to get cumulative affine matrix(first frame -> current frame, orginal scale)
+        Args:
+            curr_frame(numpy.ndarray): original image;
+            dets(numpy.ndarray): yolo detections(original scale) for foreground, 
+                shape=(#dets, 5), cx, cy, w, h, score;
+        """
+        self.ori_img_shape = curr_frame.shape[:2]  # set at runtime
 
         if len(curr_frame.shape) == 3:  # colorful bgr
             curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
@@ -109,6 +129,24 @@ class UnifiedCMC:
             curr_gray = curr_frame
         else:
             raise ValueError("something wrong")
+        
+        # resize for efficiency
+        curr_gray = cv2.resize(curr_gray, (self.process_img_shape[1], self.process_img_shape[0]), 
+                               interpolation=cv2.INTER_LINEAR)
+
+        # calculate resize_ratio at runtime
+        self.resize_ratio_x = self.process_img_shape[1] / self.ori_img_shape[1]
+        self.resize_ratio_y = self.process_img_shape[0] / self.ori_img_shape[0]
+
+        if (len(dets)):  # resize detection boxes
+            org_dets = dets
+            dets = org_dets.copy()
+            dets[:, 0] = org_dets[:, 0] * self.resize_ratio_x  # cx
+            dets[:, 1] = org_dets[:, 1] * self.resize_ratio_y  # cy
+            dets[:, 2] = org_dets[:, 2] * self.resize_ratio_x  # w
+            dets[:, 3] = org_dets[:, 3] * self.resize_ratio_y  # h
+
+        
         mask = self._get_mask_by_detection(curr_gray, dets)
 
         if self.prev_gray is None:   # first frame
@@ -197,7 +235,7 @@ class UnifiedCMC:
         new_wh = wh * scale_ratio
 
         # take top left ponit as origin
-        h, w = self.img_shape
+        h, w = self.ori_img_shape
         center = np.array([w / 2, h / 2])
         new_cxcy = new_cxcy + center
 
@@ -215,7 +253,7 @@ class UnifiedCMC:
         cxcy = dets[:, :2]  # (#dets, 2)
 
         # take center ponit as origin
-        h, w = self.img_shape
+        h, w = self.ori_img_shape
         center = np.array([w / 2, h / 2])
         cxcy = cxcy - center
 
@@ -298,25 +336,23 @@ class UnifiedCMC:
 
         return image  # Optional: return it if you want to chain ops
 
-    def set_img_shape(self, img_shape):
-        self.img_shape = img_shape
-
 
 if __name__ == "__main__":
     from pathlib import Path
     import shutil
 
     from tqdm import tqdm
-    from inference_onnx import YoloPredictor
+    from object_detect import YoloPredictor
 
 
     
 
-    predictor = YoloPredictor()
+    predictor = YoloPredictor(onnx_path="my_script/yolov8n_visdrone_add_people_merged_640_640.onnx",
+                              conf_threshold=0.25,
+                              nms_threshold=0.7)
     # cmc = UnifiedCMC(min_features=80, method='orb')
-    cmc = UnifiedCMC(min_features=30, method='optflow', img_shape=None)
-    CMC_RESIZE_RATIO = 0.3
-    np.set_printoptions(precision=3, suppress=True)
+    cmc = UnifiedCMC(min_features=30, method='optflow', process_img_shape=(640, 640))
+    np.set_printoptions(precision=3, suppress=True)  # for better numpy.npdarray print
 
     vis_dir = Path("vis_cmc")
     if vis_dir.exists():
@@ -329,13 +365,9 @@ if __name__ == "__main__":
     img_num = len(img_paths)
     for j, img_path in tqdm(enumerate(img_paths), total=img_num):
         img = cv2.imread(str(img_path))
-        cmc.set_img_shape(img.shape[:2]) 
 
-        img_for_cmc = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        img_for_cmc = cv2.resize(img_for_cmc, None, fx=CMC_RESIZE_RATIO, fy=CMC_RESIZE_RATIO)
-
-        dets = predictor.predict(img)
-        curr_affine_matrix = cmc.update(img_for_cmc, dets)
+        dets = predictor.predict(img)  # for removing moving foregrounds
+        curr_affine_matrix = cmc.update(img, dets)
 
         global_dets = cmc.local_to_global(dets)
         local_dets = cmc.global_to_local(global_dets)
@@ -343,14 +375,14 @@ if __name__ == "__main__":
         img_vis = img.copy()
         # draw global cooridate 
         for i in range(len(dets)):
-            cx, cy, w, h, score = local_dets[i]
+            cx, cy, w, h, score, cls_id = local_dets[i]
             x1 = int(cx - 0.5 * w)
             y1 = int(cy - 0.5 * h)
             x2 = int(cx + 0.5 * w)
             y2 = int(cy + 0.5 * h)
             cv2.rectangle(img_vis, (x1, y1), (x2, y2), 
                             (0,0,255), 1)
-            g_cx, g_cy, g_w, g_h, score = global_dets[i]
+            g_cx, g_cy, g_w, g_h, score, cls_id = global_dets[i]
             label = f"({g_cx:.1f}, {g_cy:.1f}): {score:.2f}"
             cv2.putText(img_vis, label, (x2 - 80, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                         0.5, (0,0,255), 2)
