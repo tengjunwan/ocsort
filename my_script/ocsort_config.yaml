@@ -64,13 +64,13 @@ CMC:
   method: "optflow"  # "optflow" or "orb"
   # ui_mask: "./ui_mask.jpg"
   ui_mask: ""
-  process_img_shape: [480, 640]  # H, W
+  process_img_shape: [240, 320]  # H, W
   
   
 EXP:
   # img_foler: "imgs/screen-20250422-150828_seg_2"
-  img_foler: "test_imgs/DJI_20250606154940_0004_V/DJI_20250606154940_0004_V_black_car"
-  resize_ratio: 1.0
+  img_foler: "test_imgs/DJI_20250912_gray_suv_seg_1"
+  resize_ratio: 0.5
   use_cmc: True
   delayed_update: False
   use_efficient_strategy: True

@@ -51,6 +51,9 @@ colors = {
 
 
 class RawYOLOv8Predictor:
+    """
+    official YOLO ultilization for ONNX comparison, support letterbox and direct rect inference
+    """
     
     def __init__(self, model_path="pretrained/yolov8n_visdrone_2.pt", device="cuda", conf=0.25, iou=0.7):
         self.model = YOLO(model_path)
@@ -103,6 +106,7 @@ class RawYOLOv8Predictor:
     
     def _default_predict(self, img_bgr: np.ndarray) -> np.ndarray:
         """
+        letterbox predict
         Returns ndarray (#dets, 6): [cx, cy, w, h, conf, cls] in ORIGINAL image coordinates.
         """
         H, W = img_bgr.shape[:2]
@@ -139,17 +143,50 @@ class RawYOLOv8Predictor:
         else:
             return self._default_predict(img)
     
+    
 
+def denoise_with_blur(img, method="gaussian", level=1):
+    """
+    Denoise noisy images by blurring.
+    
+    Args:
+        img: input image (numpy array, BGR).
+        method: "gaussian", "median", or "bilateral".
+        level: integer >= 1, controls blur strength.
+               higher = stronger smoothing.
+    
+    Returns:
+        Blurred / denoised image.
+    """
+    level = max(1, int(level))
 
+    if method == "gaussian":
+        # kernel size must be odd
+        k = 2 * level + 1
+        return cv2.GaussianBlur(img, (k, k), sigmaX=level*0.8)
+
+    elif method == "median":
+        k = 2 * level + 1
+        return cv2.medianBlur(img, k)
+
+    elif method == "bilateral":
+        # d: diameter of pixel neighborhood
+        d = 5 + 2 * level
+        sigmaColor = 20 * level
+        sigmaSpace = 20 * level
+        return cv2.bilateralFilter(img, d, sigmaColor, sigmaSpace)
+
+    else:
+        return img
     
 if __name__ == "__main__":
     # MODEL_PATH = Path("pretrained/yolov8n_visdrone_add_people.pt")
     # MODEL_PATH = Path("pretrained/yolov8n_visdrone_2.pt")
     # MODEL_PATH = Path("pretrained/yolov8n_visdrone_2.onnx")
-    MODEL_PATH = Path("pretrained/yolov8n_visdrone_add_people_merged_480_640.onnx")
+    MODEL_PATH = Path("pretrained/yolov8n_visdrone_add_people_merged_640_640_addIssueData.onnx")
     model_format = MODEL_PATH.suffix
 
-    IMG_DIR = Path("imgs/uav0000306_00230_v")
+    IMG_DIR = Path("test_issues/low_detection_b_20250923_seg_1")
     # IMG_DIR = Path("test_issues/night_issue_seg_5")
     
     img_paths= list(IMG_DIR.glob("*.jpg"))
@@ -164,6 +201,7 @@ if __name__ == "__main__":
         (37,255,225), (255,191,0), (0,255,0), (0,165,255), (255,0,255),
         (180,105,255), (0,215,255), (255,144,30), (144,238,144), (30,105,210)
     ]
+    RESIZE_RATIO = 1.0
 
     # 1. Create predictor
     if model_format == ".pt":
@@ -172,20 +210,23 @@ if __name__ == "__main__":
         # predictor = OldYoloPredictor(onnx_path=MODEL_PATH,
         #                              conf_threshold = 0.25,
         #                              nms_threshold = 0.7)
-        # predictor = YoloPredictor(onnx_path=MODEL_PATH,
-        #                           conf_threshold = 0.25,
-        #                           nms_threshold = 0.7)
-        predictor = YoloPredictorRect(onnx_path=MODEL_PATH,
-                                    conf_threshold = 0.25,
-                                    nms_threshold = 0.7)
+        predictor = YoloPredictor(onnx_path=MODEL_PATH,
+                                  conf_threshold = 0.25,
+                                  nms_threshold = 0.7)
+        # predictor = YoloPredictorRect(onnx_path=MODEL_PATH,
+        #                             conf_threshold = 0.25,
+        #                             nms_threshold = 0.7)
     else:
         raise RuntimeError(f"no valid model: {MODEL_PATH}")
 
 
+    
     # 2. Draw and save result
     for img_path in tqdm(img_paths, total=len(img_paths)):
         img = cv2.imread(str(img_path))
-        img = img[70:511, 83: 883, :]
+        if RESIZE_RATIO < 0.99:
+            img = cv2.resize(img, None, fx=RESIZE_RATIO, fy=RESIZE_RATIO)
+        # img = denoise_with_blur(img, "gaussian", level=6)
         vis_img = img.copy()
         # if model_format == ".pt":
         #     outputs, img_info, output_cls = predictor.predict(img)

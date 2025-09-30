@@ -6,7 +6,9 @@ import cv2
 
 
 class OldYoloPredictor():  # obsolete
-    """good old YOLO Detector"""
+    """
+    good old YOLO Detector: resize input to (640, 640) for simplicity
+    """
 
     def __init__(self, onnx_path="my_script/yolov8n_visdrone_2.onnx",
                  conf_threshold = 0.25,

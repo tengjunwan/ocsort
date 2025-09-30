@@ -3,7 +3,7 @@ import numpy as np
 
 
 class UnifiedCMC:
-    def __init__(self, min_features=30, method='orb', process_img_shape=(640, 640), ui_mask="", **kwargs):
+    def __init__(self, min_features=30, method='orb', process_img_shape=(640, 640), ui_mask="", debug_mode=False, **kwargs):
         """
         Unified Camera Motion Compensation supporting ORB and Optical Flow
         method: 'orb' or 'optflow'
@@ -23,9 +23,12 @@ class UnifiedCMC:
         self.resize_ratio_y = None  # process image H / original image H, calculate at runtime
 
         self.orb_config = {"orb_num": 1000}
+
+        # my configuration
         self.optflow_config = {"maxCorners": 50, 
                                "qualityLevel": 0.01, 
                                "minDistance": 7,
+                               "blockSize": 3,
                                "winSize": (15, 15),
                                "maxLevel": 3
                                }
@@ -40,6 +43,11 @@ class UnifiedCMC:
                 self.ui_mask = (ui_mask_img > 127).astype(np.uint8)  
             except:
                 print(f"failed to load ui mask:{ui_mask}")
+
+        self.debug_mode = debug_mode  # for visualization 
+        self.vis_img = None  # visualization image
+        self.feature_match_num = 0  # number of matching feature points 
+        self.prev_pts_num = 0
 
 
     def _get_mask_by_detection(self, img, dets):
@@ -93,7 +101,8 @@ class UnifiedCMC:
                                        maxCorners=self.optflow_config["maxCorners"], 
                                        qualityLevel=self.optflow_config["qualityLevel"], 
                                        minDistance=self.optflow_config["minDistance"], 
-                                       mask=mask)
+                                       mask=mask,
+                                       blockSize=self.optflow_config["blockSize"])
 
     def _estimate_rigid_transform_from_points(self, pts1, pts2):
         h, w = self.ori_img_shape
@@ -164,9 +173,14 @@ class UnifiedCMC:
             A = self._update_optical_flow(curr_gray, mask)
 
 
+
         self.curr_affine_matrix = np.eye(3)
         self.curr_affine_matrix[:2] = A
         self.cumu_affine_matrix = self.curr_affine_matrix @ self.cumu_affine_matrix
+
+        if self.debug_mode:
+            self.vis_img = self.draw_camera_info(self.vis_img)
+
         return self.curr_affine_matrix
 
     def _update_orb(self, curr_gray, mask):
@@ -189,13 +203,24 @@ class UnifiedCMC:
 
     def _update_optical_flow(self, curr_gray, mask):
         if self.prev_pts is None or len(self.prev_pts) < self.min_features:
+            
+            if self.debug_mode:
+                self.vis_img = self._vis_opt_flow(curr_gray, mask, self.prev_pts, None, None)
+                if self.prev_pts is not None:
+                    self.prev_pts_num = len(self.prev_pts)
+                else:
+                    self.prev_pts_num = 0
+                self.feature_match_num = 0
+
             self.prev_pts = self._get_sparse_points(self.prev_gray, mask)
             self.prev_gray = curr_gray
+
             return np.eye(2, 3)
 
         curr_pts, status, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray, curr_gray, self.prev_pts, 
                                                        self.optflow_config["winSize"],
                                                        self.optflow_config["maxLevel"])
+
         good_prev = self.prev_pts[status.flatten() == 1]
         good_curr = curr_pts[status.flatten() == 1]
 
@@ -205,6 +230,11 @@ class UnifiedCMC:
             A = self._estimate_rigid_transform_from_points(good_prev, good_curr)
             if A is None:
                 A = np.eye(2, 3)
+
+        if self.debug_mode:  # for debug
+            self.vis_img = self._vis_opt_flow(curr_gray, mask, self.prev_pts, curr_pts, status)
+            self.feature_match_num = len(good_prev)
+            self.prev_pts_num = len(self.prev_pts)
 
         # if good_curr is None or len(good_curr) < self.min_features:
         #     print("extract")
@@ -274,6 +304,21 @@ class UnifiedCMC:
         new_dets[:, 2:4] = new_wh
         return new_dets
     
+    def global_to_local_for_velocity(self, vs):
+        # convert velocity direction from global to local for display 
+        # vs = (#trks, 2), 2 means vx, vy
+    
+        M = self.cumu_affine_matrix[:2, :2]
+        scale_x = np.linalg.norm(M[:, 0])
+        scale_y = np.linalg.norm(M[:, 1])
+        R = np.zeros((2, 2))
+        R[:, 0] = M[:, 0] / scale_x
+        R[:, 1] = M[:, 1] / scale_y
+
+        local_vs = np.dot(vs, R.T)  # (#trks, 2)
+        return local_vs
+
+    
     def _decompose_affine(self, A):
         # A: 2x3 or 3x3 affine matrix
         if A.shape == (3, 3):
@@ -303,11 +348,17 @@ class UnifiedCMC:
         }
     
     def get_camera_info(self):
-        affine_info = self._decompose_affine(self.cumu_affine_matrix)
+        cumu_affine_info = self._decompose_affine(self.cumu_affine_matrix)
+        curr_affine_info = self._decompose_affine(self.curr_affine_matrix)
+
         camera_info = {}
-        camera_info["camera_zoom"] = (affine_info["scale_x"] + affine_info["scale_y"]) * 0.5
-        camera_info["camera_translation"] = (-1 * affine_info["translation_x"], -1 * affine_info["translation_y"])
-        camera_info["camera_rotation"] = -1 * affine_info["rotation_deg"]
+        camera_info["cumu_camera_zoom"] = (cumu_affine_info["scale_x"] + cumu_affine_info["scale_y"]) * 0.5
+        camera_info["cumu_camera_translation"] = (-1 * cumu_affine_info["translation_x"], -1 * cumu_affine_info["translation_y"])
+        camera_info["cumu_camera_rotation"] = -1 * cumu_affine_info["rotation_deg"]
+
+        camera_info["curr_camera_zoom"] = (curr_affine_info["scale_x"] + curr_affine_info["scale_y"]) * 0.5
+        camera_info["curr_camera_translation"] = (-1 * curr_affine_info["translation_x"], -1 * curr_affine_info["translation_y"])
+        camera_info["curr_camera_rotation"] = -1 * curr_affine_info["rotation_deg"]
 
         return camera_info
     
@@ -317,15 +368,21 @@ class UnifiedCMC:
         H, W = image.shape[:2]
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
-        thickness = 2
+        thickness = 1
         line_height = 18
 
         # Convert info to display strings
         lines = [
-            f"Zoom: x{camera_info['camera_zoom']:.2f}",
-            f"Trans: ({camera_info['camera_translation'][0]:.1f}, {camera_info['camera_translation'][1]:.1f})",
-            f"Rot: {camera_info['camera_rotation']:.1f} deg"
+            f"cumulative Zoom: x{camera_info['cumu_camera_zoom']:.2f}",
+            f"cumulative Trans: ({camera_info['cumu_camera_translation'][0]:.1f}, {camera_info['cumu_camera_translation'][1]:.1f})",
+            f"cumulative Rot: {camera_info['cumu_camera_rotation']:.1f} deg",
+            f"current Zoom: x{camera_info['curr_camera_zoom']:.2f}",
+            f"current Trans: ({camera_info['curr_camera_translation'][0]:.1f}, {camera_info['curr_camera_translation'][1]:.1f})",
+            f"current Rot: {camera_info['curr_camera_rotation']:.1f} deg"
         ]
+        if self.debug_mode:
+            lines.append(f"number of match: {self.feature_match_num}")
+            lines.append(f"number of previous points: {self.prev_pts_num}")
 
         # Draw lines from top-right corner downward
         for i, text in enumerate(lines):
@@ -335,6 +392,47 @@ class UnifiedCMC:
             cv2.putText(image, text, (x, y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
 
         return image  # Optional: return it if you want to chain ops
+    
+    def _vis_opt_flow(self, curr_gray, mask, prev_pts, curr_pts, status, use_ori_size=True):
+        curr_gray_masked = curr_gray * mask
+        vis_img = cv2.cvtColor(curr_gray_masked, cv2.COLOR_GRAY2BGR)
+        if use_ori_size:
+            vis_img = cv2.resize(vis_img, (self.ori_img_shape[1], self.ori_img_shape[0]))
+
+        if prev_pts is not None and curr_pts is not None and status is not None:
+            for (p0, p1, st) in zip(prev_pts, curr_pts, status):
+                if st == 1:  # successfully tracked
+                    x0, y0 = p0.ravel()
+                    x1, y1 = p1.ravel()
+
+                    if use_ori_size:
+                        x0 = x0 / self.resize_ratio_x
+                        y0 = y0 / self.resize_ratio_y
+                        x1 = x1 / self.resize_ratio_x
+                        y1 = y1 / self.resize_ratio_y
+
+                    # old point (green circle)
+                    cv2.circle(vis_img, (int(x0), int(y0)), 3, (0, 255, 0), -1)
+
+                    # new point (red circle)
+                    cv2.circle(vis_img, (int(x1), int(y1)), 3, (0, 0, 255), -1)
+
+                    # line connecting them (blue)
+                    cv2.line(vis_img, (int(x0), int(y0)), (int(x1), int(y1)), (255, 0, 0), 1)
+        else:  # only prev_pts is given
+            for p0 in prev_pts:
+                x0, y0 = p0.ravel()
+                if use_ori_size:
+                    x0 = x0 / self.resize_ratio_x
+                    y0 = y0 / self.resize_ratio_y
+                # old point (green circle)
+                cv2.circle(vis_img, (int(x0), int(y0)), 3, (0, 255, 0), -1)
+                   
+
+        return vis_img
+
+
+
 
 
 if __name__ == "__main__":
@@ -347,11 +445,12 @@ if __name__ == "__main__":
 
     
 
-    predictor = YoloPredictor(onnx_path="my_script/yolov8n_visdrone_add_people_merged_640_640.onnx",
+    predictor = YoloPredictor(onnx_path="my_script/yolov8n_visdrone_add_people_merged_640_640_addIssueData.onnx",
                               conf_threshold=0.25,
                               nms_threshold=0.7)
     # cmc = UnifiedCMC(min_features=80, method='orb')
-    cmc = UnifiedCMC(min_features=30, method='optflow', process_img_shape=(640, 640))
+    # cmc = UnifiedCMC(min_features=30, method='optflow', process_img_shape=(144, 192), debug_mode=True)
+    cmc = UnifiedCMC(min_features=30, method='optflow', process_img_shape=(240, 320), debug_mode=True)
     np.set_printoptions(precision=3, suppress=True)  # for better numpy.npdarray print
 
     vis_dir = Path("vis_cmc")
@@ -360,33 +459,23 @@ if __name__ == "__main__":
     vis_dir.mkdir()
 
 
-    img_dir = Path("test_imgs/DJI_20250606154301_0002_V/DJI_20250606154301_0002_V_black_car")
+    img_dir = Path("test_imgs/DJI_20250912_gray_suv_seg_1")
     img_paths = sorted(list(img_dir.glob("*.jpg")))
     img_num = len(img_paths)
     for j, img_path in tqdm(enumerate(img_paths), total=img_num):
+        img_id = int(img_path.stem)
+        if img_id == 225:
+            print("debug")
         img = cv2.imread(str(img_path))
+        img = cv2.resize(img, (640, 640))
 
         dets = predictor.predict(img)  # for removing moving foregrounds
         curr_affine_matrix = cmc.update(img, dets)
 
-        global_dets = cmc.local_to_global(dets)
-        local_dets = cmc.global_to_local(global_dets)
+        img_vis = cmc.vis_img
+        if img_vis is None:
+            continue
 
-        img_vis = img.copy()
-        # draw global cooridate 
-        for i in range(len(dets)):
-            cx, cy, w, h, score, cls_id = local_dets[i]
-            x1 = int(cx - 0.5 * w)
-            y1 = int(cy - 0.5 * h)
-            x2 = int(cx + 0.5 * w)
-            y2 = int(cy + 0.5 * h)
-            cv2.rectangle(img_vis, (x1, y1), (x2, y2), 
-                            (0,0,255), 1)
-            g_cx, g_cy, g_w, g_h, score, cls_id = global_dets[i]
-            label = f"({g_cx:.1f}, {g_cy:.1f}): {score:.2f}"
-            cv2.putText(img_vis, label, (x2 - 80, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
-                        0.5, (0,0,255), 2)
-        cmc.draw_camera_info(img_vis)
         
         cv2.imwrite(vis_dir / img_path.name, img_vis)
             

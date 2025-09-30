@@ -174,24 +174,30 @@ for i, img_path in enumerate(img_paths):
     if use_cmc:
         # load tracks coordinate(global)
         global_trks = np.zeros((len(rtn_tracks), 4), dtype=np.float32)
-        global_trks_velocity = np.zeros((len(rtn_tracks), 2), dtype=np.float32)
+        global_trks_velocities = np.zeros((len(rtn_tracks), 2), dtype=np.float32)
         for i, trk in enumerate(rtn_tracks):
             global_trks[i] = [trk.cx, trk.cy, trk.w, trk.h]
-            global_trks_velocity[i] = [trk.vx, trk.vy]
+            global_trks_velocities[i] = [trk.vx, trk.vy]
+
         # convert from global to local
         local_trks = cmc.global_to_local(global_trks)
         for i, trk in enumerate(rtn_tracks):
             trk.cx, trk.cy, trk.w, trk.h = local_trks[i]
+
         # convert velocity direction from global to local for display 
-        M = cmc.cumu_affine_matrix[:2, :2].copy()
-        scale_x = np.linalg.norm(M[:, 0])
-        scale_y = np.linalg.norm(M[:, 1])
-        R = np.zeros((2, 2))
-        R[:, 0] = M[:, 0] / scale_x
-        R[:, 1] = M[:, 1] / scale_y
-        global_trks_velocity_for_display = np.dot(global_trks_velocity, R.T)  # (#trks, 2)
+        local_trks_velocities = cmc.global_to_local_for_velocity(global_trks_velocities)
         for i, trk in enumerate(rtn_tracks):
-            trk.vx, trk.vy = global_trks_velocity_for_display[i]
+            trk.vx, trk.vy = local_trks_velocities[i]
+
+        # M = cmc.cumu_affine_matrix[:2, :2].copy()
+        # scale_x = np.linalg.norm(M[:, 0])
+        # scale_y = np.linalg.norm(M[:, 1])
+        # R = np.zeros((2, 2))
+        # R[:, 0] = M[:, 0] / scale_x
+        # R[:, 1] = M[:, 1] / scale_y
+        # global_trks_velocity_for_display = np.dot(global_trks_velocity, R.T)  # (#trks, 2)
+        # for i, trk in enumerate(rtn_tracks):
+        #     trk.vx, trk.vy = global_trks_velocity_for_display[i]
 
     if use_cmc and delayed_update:  # delay update 
         _ = cmc.update(img, det_results)
