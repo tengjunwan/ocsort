@@ -65,14 +65,23 @@ CMC:
   # ui_mask: "./ui_mask.jpg"
   ui_mask: ""
   process_img_shape: [240, 320]  # H, W
+
+
+PROJECTOR:
+  fx: 5773.5
+  fy: 5783.2
+  calibration_w: 8000.0
+  calibration_h: 6000.0
+  h: 165.0
   
   
 EXP:
   # img_foler: "imgs/screen-20250422-150828_seg_2"
-  img_foler: "test_imgs/DJI_20250912_gray_suv_seg_1"
-  resize_ratio: 0.5
-  use_cmc: True
-  delayed_update: False
+  img_foler: "test_gimbal_data/test_frames/0006_W"
+  resize_ratio: 0.75
+  use_cmc: False
   use_efficient_strategy: True
+  use_projector: True
+  gimbal_status_file: "test_gimbal_data/test_csv/0006_W.csv"
 
 

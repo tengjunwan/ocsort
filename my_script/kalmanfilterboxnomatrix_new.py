@@ -265,6 +265,15 @@ class KalmanFilterBoxTrackerNoMatrix():
 
         return np.array([cx, cy, w, h, id], dtype=np.float32)
     
+    def get_state(self):
+        cx, cy, w, h = self._cxcysr2cxcywh(self.x[:4].flatten())
+
+        return np.array([cx, cy, w, h], dtype=np.float32)
+    
+    def set_state(self, cx, cy, w, h):
+        cx, cy, s, r = self._cxcywh2cxcysr(np.array([cx, cy, w, h], dtype=np.float32))
+        self.x[:4] = np.array([cx, cy, s, r]).reshape(4, 1)
+    
     def _cxcywh2cxcysr(self, cxcywh):
         cx, cy, w, h = cxcywh.flatten()
         shape = cxcywh.shape

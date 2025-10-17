@@ -1,5 +1,8 @@
+import collections
+
 import cv2
 import numpy as np
+
 
 
 class UnifiedCMC:
@@ -44,6 +47,7 @@ class UnifiedCMC:
             except:
                 print(f"failed to load ui mask:{ui_mask}")
 
+        # for debug
         self.debug_mode = debug_mode  # for visualization 
         self.vis_img = None  # visualization image
         self.feature_match_num = 0  # number of matching feature points 
@@ -304,6 +308,39 @@ class UnifiedCMC:
         new_dets[:, 2:4] = new_wh
         return new_dets
     
+    def compensate_for_current_frame(self, dets):
+        # only transform center point
+        # w and h then is scaled by scale ratio 
+        if len(dets) == 0:
+            return dets.copy()
+        
+        cxcy = dets[:, :2]  # (#dets, 2)
+
+        # take center ponit as origin
+        h, w = self.ori_img_shape
+        center = np.array([w / 2, h / 2])
+        cxcy = cxcy - center
+        
+        # transform center point
+        homog = np.hstack([cxcy, np.ones((cxcy.shape[0], 1))])  # (#dets, 3)
+        trans_matrix = self.curr_affine_matrix[:2]  # (2, 3)
+        new_cxcy = np.dot(homog, trans_matrix.T)  # (#dets, 2)
+
+        # take top left point as origin
+        new_cxcy = new_cxcy + center
+
+        # rescale w and h
+        scale_ratio_x = np.sqrt(trans_matrix[0, 0]**2 + trans_matrix[1, 0]**2)
+        scale_ratio_y = np.sqrt(trans_matrix[0, 1]**2 + trans_matrix[1, 1]**2)
+        scale_ratio = 0.5 * (scale_ratio_x + scale_ratio_y)
+        new_wh = dets[:, 2:4] * scale_ratio  # (#dets, 2)
+
+        new_dets = dets.copy()
+        new_dets[:, 0:2] = new_cxcy
+        new_dets[:, 2:4] = new_wh
+        return new_dets
+
+    
     def global_to_local_for_velocity(self, vs):
         # convert velocity direction from global to local for display 
         # vs = (#trks, 2), 2 means vx, vy
@@ -317,7 +354,6 @@ class UnifiedCMC:
 
         local_vs = np.dot(vs, R.T)  # (#trks, 2)
         return local_vs
-
     
     def _decompose_affine(self, A):
         # A: 2x3 or 3x3 affine matrix
@@ -372,14 +408,22 @@ class UnifiedCMC:
         line_height = 18
 
         # Convert info to display strings
-        lines = [
-            f"cumulative Zoom: x{camera_info['cumu_camera_zoom']:.2f}",
-            f"cumulative Trans: ({camera_info['cumu_camera_translation'][0]:.1f}, {camera_info['cumu_camera_translation'][1]:.1f})",
-            f"cumulative Rot: {camera_info['cumu_camera_rotation']:.1f} deg",
-            f"current Zoom: x{camera_info['curr_camera_zoom']:.2f}",
-            f"current Trans: ({camera_info['curr_camera_translation'][0]:.1f}, {camera_info['curr_camera_translation'][1]:.1f})",
-            f"current Rot: {camera_info['curr_camera_rotation']:.1f} deg"
-        ]
+        lines = []
+        for key, val in camera_info.items():
+            if isinstance(val, (list, tuple, np.ndarray)) and len(val) == 2:
+                line = f"{key}: ({val[0]:.1f}, {val[1]:.1f})"
+            elif isinstance(val, float) or isinstance(val, int):
+                # Choose formatting based on key
+                if "zoom" in key.lower():
+                    line = f"{key}: x{val:.2f}"
+                elif "rot" in key.lower():
+                    line = f"{key}: {val:.1f} deg"
+                else:
+                    line = f"{key}: {val:.3f}"
+            else:
+                line = f"{key}: {val}"
+            lines.append(line)
+
         if self.debug_mode:
             lines.append(f"number of match: {self.feature_match_num}")
             lines.append(f"number of previous points: {self.prev_pts_num}")
@@ -430,10 +474,122 @@ class UnifiedCMC:
                    
 
         return vis_img
+    
+
+    
 
 
 
+class NewCMC(UnifiedCMC):
 
+    def __init__(self, init_fx, init_fy,  h, pitch, zoom=1.0, yaw0=0.0, min_features=30, 
+                 method='opt', process_img_shape=(640, 640), ui_mask="", debug_mode=False,  **kwargs):
+        super().__init__(min_features, method, process_img_shape, ui_mask, debug_mode, **kwargs)
+
+        # camera state
+        self.init_fx = init_fx
+        self.init_fy = init_fy
+        self.theta = np.deg2rad(pitch)   # pitch θ
+        self.phi = np.deg2rad(yaw0)      # yaw φ
+        self.zoom = zoom
+
+        self.fx = self.init_fx * self.zoom
+        self.fy = self.init_fy * self.zoom
+
+        # world/scene
+        self.h = float(h)
+
+        # last instantaneous deltas (for debugging/telemetry)
+        self.last_ds = 0.0
+        self.last_dphi = 0.0
+        self.last_dtheta = 0.0
+
+    def update(self, curr_frame, dets):
+        """
+        1) calls UnifiedCMC.update() to refresh self.curr_affine_matrix
+        2) decomposes similarity -> (ds, dx, dy)
+        3) maps to (dφ, dθ) at the image center
+        4) updates (fx, fy, φ, θ) and returns the new state
+        """
+        _ = super().update(curr_frame, dets)   # updates self.curr_affine_matrix
+
+        A = self.curr_affine_matrix[:2, :]     # 2x3 similarity from your base
+        a, b, tx = A[0]
+        c, d, ty = A[1]
+
+        # isotropic scale from similarity
+        scale_x = np.hypot(a, c)
+        scale_y = np.hypot(b, d)
+        s = 0.5 * (scale_x + scale_y)
+        ds = s - 1.0
+
+        # translation at image center (your base already centers points)
+        dx, dy = float(tx), float(ty)
+
+        # map to angles (small-motion linearization at center)
+        eps = 1e-8
+        denom = self.fx * max(np.cos(self.theta), eps)  # protect cosθ≈0
+        dphi = -dx / denom
+        dtheta =  -dy / self.fy          # sign: Δy ≈ fy·dθ at the center
+
+        # clamp one-frame zoom to avoid spikes
+        ds = float(np.clip(ds, -0.2, 0.2))
+
+        # update state
+        self.fx *= (1.0 + ds)
+        self.fy *= (1.0 + ds)
+        self.zoom *= (1.0 + ds)
+        self.phi  += dphi
+        self.theta += dtheta
+
+        # store deltas for inspection
+        self.last_ds, self.last_dphi, self.last_dtheta = ds, dphi, dtheta
+
+        return self.get_camera_info()
+    
+    # ---- utilities ----
+    def get_camera_info(self):
+        return {
+            "fx": self.fx,
+            "fy": self.fy,
+            "zoom": self.zoom,
+            "phi": np.rad2deg(self.phi),
+            "theta": np.rad2deg(self.theta),
+            "ds": self.last_ds, 
+            "dphi": np.rad2deg(self.last_dphi), 
+            "dtheta": np.rad2deg(self.last_dtheta),
+        }
+    
+    def project_to_world(self, cx, cy):
+        """
+        Map pixels (absolute, image origin top-left) to the *initial-world* (Xw, Zw),
+        where the Zw axis is the initial forward direction (yaw=0 at frame 1).
+        """
+        cx = np.asarray(cx, dtype=float)
+        cy = np.asarray(cy, dtype=float)
+
+        # shift origin to image center
+        h_img, w_img = self.ori_img_shape
+        cx = cx - 0.5 * w_img
+        cy = cy - 0.5 * h_img
+
+        # normalized image coords
+        u = cx / self.fx
+        v = cy / self.fy
+
+        cth, sth = np.cos(self.theta), np.sin(self.theta)
+        cph, sph = np.cos(self.phi), np.sin(self.phi)
+
+        # plane intersection scale
+        denom = cth * v + sth
+        denom = np.where(np.abs(denom) < 1e-6, np.sign(denom) * 1e-6, denom)
+        a = self.h / denom
+
+        # initial-world coordinates (axes fixed to first frame)
+        Xw = a * ( cph * u - sph * sth * v + sph * cth )
+        Zw = a * (-sph * u - cph * sth * v + cph * cth )
+        return Xw, Zw
+    
 
 if __name__ == "__main__":
     from pathlib import Path
@@ -441,6 +597,7 @@ if __name__ == "__main__":
 
     from tqdm import tqdm
     from object_detect import YoloPredictor
+    import matplotlib.pyplot as plt
 
 
     
@@ -450,7 +607,18 @@ if __name__ == "__main__":
                               nms_threshold=0.7)
     # cmc = UnifiedCMC(min_features=80, method='orb')
     # cmc = UnifiedCMC(min_features=30, method='optflow', process_img_shape=(144, 192), debug_mode=True)
-    cmc = UnifiedCMC(min_features=30, method='optflow', process_img_shape=(240, 320), debug_mode=True)
+    # cmc = UnifiedCMC(min_features=30, method='optflow', process_img_shape=(240, 320), debug_mode=True)
+
+    FX_FOR_8000_6000 = 5773 # 5773 for 8000*6000, since we use 
+    FY_FOR_8000_6000 = 5773
+    IMG_WIDTH = 540
+    IMG_HEIGHT = 960
+    init_fx = FX_FOR_8000_6000 * (IMG_WIDTH / 8000)
+    init_fy = FY_FOR_8000_6000 * (IMG_HEIGHT / 6000)
+
+    cmc = NewCMC(init_fx=init_fx,  
+                 init_fy=init_fy, 
+                 h=100, pitch=30, zoom=1, process_img_shape=(240, 320), debug_mode=True)
     np.set_printoptions(precision=3, suppress=True)  # for better numpy.npdarray print
 
     vis_dir = Path("vis_cmc")
@@ -462,22 +630,54 @@ if __name__ == "__main__":
     img_dir = Path("test_imgs/DJI_20250912_gray_suv_seg_1")
     img_paths = sorted(list(img_dir.glob("*.jpg")))
     img_num = len(img_paths)
+    all_Xw = []
+    all_Zw = []
     for j, img_path in tqdm(enumerate(img_paths), total=img_num):
         img_id = int(img_path.stem)
         if img_id == 225:
             print("debug")
         img = cv2.imread(str(img_path))
-        img = cv2.resize(img, (640, 640))
+        img = cv2.resize(img, (IMG_HEIGHT, IMG_WIDTH))
 
         dets = predictor.predict(img)  # for removing moving foregrounds
         curr_affine_matrix = cmc.update(img, dets)
 
         img_vis = cmc.vis_img
-        if img_vis is None:
-            continue
+        # if img_vis is not None:
+            # cv2.imwrite(vis_dir / img_path.name, img_vis)
 
+
+        if len(dets) == 0:
+            continue
         
-        cv2.imwrite(vis_dir / img_path.name, img_vis)
+        # pick detection closest to image center
+        cxs = dets[:, 0]
+        cys = dets[:, 1]
+        dists = np.sqrt((cxs - IMG_WIDTH * 0.5)**2 + (cys - IMG_HEIGHT * 0.5)**2)
+        target_idx = np.argmin(dists)
+        
+        # cx, cy = cxs[target_idx], cys[target_idx]
+        cx, cy = np.array([IMG_WIDTH * 0.5]), np.array([IMG_HEIGHT * 0.5])
+        
+        Xw, Zw = cmc.project_to_world(cx, cy)  # center coords
+        all_Xw.append(float(Xw))
+        all_Zw.append(float(Zw))
+        
+
+    # Plot and save
+    for i in range(len(all_Xw)):
+        Xws = all_Xw[:i+1]
+        Zws = all_Zw[:i+1]
+        plt.figure()
+        plt.plot(Xws, Zws, 'o-', markersize=3)
+        plt.xlabel("Xw (m)")
+        plt.ylabel("Zw (m)")
+        plt.title("Projected world trajectory of target car")
+        plt.axis("equal")
+        plt.grid(True)
+        plt.savefig(str(vis_dir / f"world_trajectory_{i}.png"), dpi=200)
+        plt.close()
+
             
             
 

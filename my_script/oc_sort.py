@@ -170,7 +170,7 @@ class OCSort(object):
         self.target_consecutive_missed_frames = 0
         self.target_location = np.zeros(4, dtype=np.float32)  # cx, cy, w, h
 
-    def update(self, yolo_dets, det_feats, det_feats_mask, debug_mode=False):
+    def update(self, yolo_dets, det_feats, det_feats_mask, projector=None, debug_mode=False):
         """
         Args:
             yolo_dets (numpy.ndarray): 
@@ -179,6 +179,7 @@ class OCSort(object):
                 shape (#det, feat_dim), appearance embeddings of detections;
             det_feats_mask (numpy.ndarray, bool):
                 shape (#det, feat_dim), indicate vailidation appearance embeddings of detections;
+            projector: 'None' or 'CoordinateProjector', used to project pixel coordinate to world coordinate;
 
         return:
             yolo_dets_with_id (numpy.ndarray):
@@ -250,6 +251,10 @@ class OCSort(object):
             # consecutive_missed_frames
             consecutive_missed_frames[i] = self.trackers[i].consecutive_missed_frames
 
+        # project from world coordinate to pixel coordinate
+        if projector is not None:
+            trks = projector.project_from_world_to_pixel(trks, use_prev_gimbal=False)
+
     
         # 1st round association(trackers vs high score detections)
         buffer_ratio = exp_saturate_by_age(
@@ -263,11 +268,14 @@ class OCSort(object):
             det_feats_high, trk_feats, self.first_round_match_app_weight, self.first_round_match_app_threshold)
 
         if self.verbose:
-            print(f"======frist round match({self.frame_count}-th frame)======")
+            print(f"======first round match({self.frame_count}-th frame)======")
             print(f"matched num: {len(matched)}")
 
         for det_idx, trk_idx in matched:   # update trackers by matched detection immediately
-            self.trackers[trk_idx].update(dets_high[det_idx, :4])  # update location
+            if projector is not None:
+                self.trackers[trk_idx].update(projector.project_from_pixel_to_world(dets_high[det_idx, :4]))
+            else:
+                self.trackers[trk_idx].update(dets_high[det_idx, :4])  # update location
             if det_feats_mask_high[det_idx]:
                 self.trackers[trk_idx].update_appearance(det_feats_high[det_idx], dets_high[det_idx, 4])  # update appearance
 
@@ -302,7 +310,10 @@ class OCSort(object):
             # update trackers by matched detection immediately
             for det_idx_in_sec, trk_idx_in_left in matched_in_left:
                 trk_idx = unmatched_trks[trk_idx_in_left]
-                self.trackers[trk_idx].update(dets_second[det_idx_in_sec, :4])  # update location
+                if projector is not None:  # update location
+                    self.trackers[trk_idx].update(projector.project_from_pixel_to_world(dets_second[det_idx_in_sec, :4]))  
+                else:
+                    self.trackers[trk_idx].update(dets_second[det_idx_in_sec, :4])  
                 if det_feats_mask_second[det_idx_in_sec]:
                     self.trackers[trk_idx].update_appearance(det_feats_second[det_idx_in_sec],  # update appereance
                                                             dets_second[det_idx_in_sec, 4])
@@ -349,7 +360,11 @@ class OCSort(object):
             for det_idx_in_left, trk_idx_in_left in matched_in_left:   
                 det_idx = unmatched_dets[det_idx_in_left]
                 trk_idx = unmatched_trks[trk_idx_in_left]
-                self.trackers[trk_idx].update(dets_high[det_idx, :4])  # update location
+                if projector is not None:  # update location
+                    self.trackers[trk_idx].update(projector.project_from_pixel_to_world(dets_high[det_idx, :4]))  
+                else:
+                    self.trackers[trk_idx].update(dets_high[det_idx, :4])  
+
                 if det_feats_mask_high[det_idx]:
                     self.trackers[trk_idx].update_appearance(det_feats_high[det_idx], dets_high[det_idx, 4])  # update appearance
                 if debug_mode:
@@ -389,6 +404,7 @@ class OCSort(object):
             if len(self.trackers) > self.max_track_num:  # prevent too many trackers
                 continue
             
+            # conditions when we don't create new tracklet
             near_target = False
             if self.target_exist:
                 # check if the detection is near target
@@ -417,7 +433,9 @@ class OCSort(object):
                 if np.max(iou_with_trks) > self.create_new_track_iou_thresh_stricter:
                     continue
 
-            
+            # create new tracklet
+            if projector is not None:
+                cx, cy, w, h = projector.project_from_pixel_to_world(np.array([cx, cy, w, h]))
             new_tracker = KalmanFilterBoxTracker(cx, cy, w, h, self.delta_t)
             if det_feats_mask_high[det_idx]:
                 new_tracker.update_appearance(det_feats_high[det_idx], dets_high[det_idx, 4])
@@ -432,6 +450,36 @@ class OCSort(object):
             return self._return_trackers(), debug_info
         else:
             return self._return_trackers()
+        
+    def correct_gimbal_status(self,
+                              projector, 
+                              theta, 
+                              phi, 
+                              zoom):
+        if projector is None:
+            return self._return_trackers()
+        
+        # load trackers 3d world state
+        trks = np.zeros((len(self.trackers), 5), dtype=np.float32)  # world, (#trks, 5), cx, cy, w, h, id
+        for i in range(len(self.trackers)):
+            cx, cy, w, h, id = self.trackers[i].get_state_with_id()
+            trks[i] = np.array([cx, cy, w, h, id], dtype=np.float32)
+
+        # project to pixel world  by using gimbal status saved in 'projector'
+        trks = projector.project_from_world_to_pixel(trks)  # pixel, (#trks, 5), cx, cy, w, h, id
+        
+        # project to 3d world by using correct gimbal status
+        projector.set_gimbal_status(theta=theta, phi=phi, zoom=zoom)
+        trks = projector.project_from_pixel_to_world(trks)  # world, (#trks, 5), cx, cy, w, h, id
+        
+        # set new 3d world location directly to trackers
+        for i in range(len(self.trackers)):
+            cx, cy, w, h, id = trks[i]
+            self.trackers[i].set_state(cx, cy, w, h)
+
+        return self._return_trackers()
+
+
         
     def _return_trackers(self):
         rtn_trackers = []
