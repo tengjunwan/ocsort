@@ -1,3 +1,5 @@
+from collections import deque
+
 import numpy as np
 
 
@@ -6,34 +8,31 @@ class CoordinateProjector():
     simple coordinate projector to convert between pixel coordinate and world coordinate
     """
 
-    def __init__(self, fx, fy, calibration_w, calibration_h, h=None):
+    def __init__(self, fx, fy, calibration_w, calibration_h, **kwargs):
         # fx, fy configurations(given at calibration stage)
         self.fx = fx
         self.fy = fy
         self.calibration_w = calibration_w
         self.calibration_h = calibration_h
-        self.h = h         # height above plane ground
+        
 
         # gimbal status 
         self.gimbal_status_is_initialized = False  # flag
         self.theta = None  # pitch(rad)
         self.phi = None    # yaw(rad)
         self.zoom = None   
+        self.height = None         # height above plane ground
         self.fx_for_use = None
         self.fy_for_use = None
-
-        # previous gimbal status
-        self.prev_theta = None  # pitch(rad)
-        self.prev_phi = None    # yaw(rad)
-        self.prev_zoom = None   
-        self.prev_fx_for_use = None
-        self.prev_fy_for_use = None
-
 
         # other status
         self.process_img_shape_is_initialized = False  # flag
         self.process_img_w = None
         self.process_img_h = None
+
+        # configures for height statistics
+        self.stat_window = deque(maxlen=100)
+        self.k = 2  
         
 
     def set_process_img_shape(self, img_w, img_h):
@@ -42,52 +41,22 @@ class CoordinateProjector():
         self.process_img_h = img_h
         self.process_img_shape_is_initialized = True  # update state
 
-    def init_gimbal_status(self, theta, phi, zoom):
-        self.set_gimbal_status(theta, phi, zoom)
-        self.set_prev_gimbal_status(theta, phi, zoom)
+    def init_gimbal_status(self, theta, phi, zoom, height):
+        self.set_gimbal_status(theta, phi, zoom, height)
         self.gimbal_status_is_initialized = True  # update state
 
-    def set_gimbal_status(self, theta, phi, zoom):
-        if self.gimbal_status_is_initialized:  # not first time
-            self.prev_theta = self.theta
-            self.prev_phi = self.phi
-            self.prev_zoom = self.zoom
-            self.prev_fx_for_use = self.fx_for_use
-            self.prev_fy_for_use = self.fy_for_use
-
+    def set_gimbal_status(self, theta, phi, zoom, height=None):
         self.theta = theta
         self.phi = phi
         self.zoom = zoom
+        if height is not None:
+            self.height = height
 
         # adjusting fx, fy
         if self.process_img_w is None or self.process_img_h is None:
             raise ValueError("need to set resolution of the processing image by calling method 'set_process_img_shape'!")
         self.fx_for_use = self.fx * (self.process_img_w / self.calibration_w) * self.zoom
         self.fy_for_use = self.fy * (self.process_img_h / self.calibration_h) * self.zoom
-
-    def set_prev_gimbal_status(self, theta, phi, zoom):
-        self.prev_theta = theta
-        self.prev_phi = phi
-        self.prev_zoom = zoom
-
-        # adjusting fx, fy
-        if self.process_img_w is None or self.process_img_h is None:
-            raise ValueError("need to set resolution of the processing image by calling method 'set_process_img_shape'!")
-        self.prev_fx_for_use = self.fx * (self.process_img_w / self.calibration_w) * self.prev_zoom
-        self.prev_fy_for_use = self.fy * (self.process_img_h / self.calibration_h) * self.prev_zoom
-
-
-    # def set_zoom(self, zoom):
-    #     self.zoom = zoom
-    #     # adjusting fx, fy
-    #     if self.process_img_w is None or self.process_img_h is None:
-    #         raise ValueError("need to set resolution of the processing image by calling method 'set_process_img_shape'!")
-    #     self.fx_for_use = self.fx * (self.process_img_w / self.calibration_w) * self.zoom
-    #     self.fy_for_use = self.fy * (self.process_img_h / self.calibration_h) * self.zoom
-
-    # def set_pitch_and_yaw(self, theta, phi):
-    #     self.theta = theta
-    #     self.phi = phi
 
     def calculate_dphi_and_dtheta(self, dx, dy):
         # dx: pixel translation in x direction(dx = xi+1 - xi) from previous frame to current frame
@@ -96,10 +65,8 @@ class CoordinateProjector():
         cth = np.cos(self.theta)
         cth = np.where(np.abs(cth) < 1e-6, np.sign(cth) * 1e-6, cth)
 
-        
         d_theta = -(dy / self.fy_for_use)
         d_phi = -(dx / self.fx_for_use) / cth
-
 
         return d_phi, d_theta
 
@@ -132,14 +99,14 @@ class CoordinateProjector():
         # plane intersection scale
         denom = cth * v + sth
         denom = np.where(np.abs(denom) < 1e-6, np.sign(denom) * 1e-6, denom)
-        a = self.h / denom
+        a = self.height / denom
 
         # initial-world coordinates (axes fixed to first frame)
         xw = a * ( cph * u - sph * sth * v + sph * cth )
         zw = a * (-sph * u - cph * sth * v + cph * cth )
 
         # ===part 2: convert w and h from pixel to world===
-        b = self.h / max(sth, 1e-6)
+        b = self.height / max(sth, 1e-6)
         ww = wi * b/ self.fx_for_use
         hw = hi * b/ self.fy_for_use
 
@@ -154,8 +121,7 @@ class CoordinateProjector():
 
         return world_dets
     
-
-    def project_from_world_to_pixel(self, world_dets, use_prev_gimbal=False):
+    def project_from_world_to_pixel(self, world_dets):
         """
         Map world to pixels (absolute, image origin top-left).
         world_dets: numpy.ndarray, shape=(#dets, 4 or more), or shape=(4 or more), first 4 columns are xw, zw, ww, hw
@@ -170,19 +136,13 @@ class CoordinateProjector():
         hw = world_dets[:, 3]
 
         # ===prepare===
-        if not use_prev_gimbal:  # current gimbal status
-            cth, sth = np.cos(self.theta), np.sin(self.theta)
-            cph, sph = np.cos(self.phi), np.sin(self.phi)
-            fx = self.fx_for_use
-            fy = self.fy_for_use
-        else:
-            cth, sth = np.cos(self.prev_theta), np.sin(self.prev_theta)
-            cph, sph = np.cos(self.prev_phi), np.sin(self.prev_phi)
-            fx = self.prev_fx_for_use
-            fy = self.prev_fy_for_use
+        cth, sth = np.cos(self.theta), np.sin(self.theta)
+        cph, sph = np.cos(self.phi), np.sin(self.phi)
+        fx = self.fx_for_use
+        fy = self.fy_for_use
 
         # ===part 1: convert cx and cy from world to pixel===
-        yw = self.h
+        yw = self.height
         a = sph * cth * xw + sth * yw + cph * cth * zw
         a = np.where(np.abs(a) < 1e-6, np.sign(a) * 1e-6, a)
         
@@ -192,7 +152,7 @@ class CoordinateProjector():
         yi = yi + 0.5 * self.process_img_h  # top left corner as origin
 
         # ===part 2: convert w and h from world to pixel===
-        b = sth / max(self.h, 1e-6) 
+        b = sth / max(self.height, 1e-6) 
         wi = b * fx * ww
         hi = b * fy * hw
 
@@ -215,36 +175,112 @@ class CoordinateProjector():
         """
         original_shape = world_dets.shape
         if len(original_shape) == 1 and original_shape[0] >= 4:   
-            world_dets = world_dets.reshape(1, -1)
+            world_dets = world_dets.reshape(1, -1)  # (dets, 4 or more)
 
-        xw = world_dets[:, 0]
-        zw = world_dets[:, 1]
-
-        cth, sth = np.cos(self.theta), np.sin(self.theta)
-        cph, sph = np.cos(self.phi), np.sin(self.phi)
-
-        yw = self.h
-        a = sph * cth * xw + sth * yw + cph * cth * zw
-        a = np.where(np.abs(a) < 1e-6, np.sign(a) * 1e-6, a)
-        
         v_original_shape = world_velocity.shape
         if len(v_original_shape) == 1 and v_original_shape[0] >= 2:   
-            world_velocity = world_velocity.reshape(1, -1)
+            world_velocity = world_velocity.reshape(1, -1)  # (dets, 2 or more)
 
+        # get location at pixel coordinate
+        pixel_dets = self.project_from_world_to_pixel(world_dets)  # (dets, 4 or more)
+
+        # prepare
+        cth, sth = np.cos(self.theta), np.sin(self.theta)
+        cph, sph = np.cos(self.phi), np.sin(self.phi)
+        yw = self.height
+        xw = world_dets[:, 0]
+        zw = world_dets[:, 1]
+        xi = pixel_dets[:, 0] - self.process_img_w * 0.5  # center as origin
+        yi = pixel_dets[:, 1] - self.process_img_h * 0.5
         vxw = world_velocity[:, 0]
         vzw = world_velocity[:, 1]
 
-        vxi = (self.fx_for_use / a) * (cph * vxw - sph *vzw)
-        vyi = (self.fy_for_use / a) * (-sph * sth * vxw - cph * sth * vzw)
+        a = sph * cth * xw + sth * yw + cph * cth * zw
+        a = np.where(np.abs(a) < 1e-6, np.sign(a) * 1e-6, a)  # prevent zero division
+
+        a_dot = sph * cth * vxw + cph * cth * vzw
+
+        vxi = (self.fx_for_use / a) * (cph * vxw - sph *vzw) - (a_dot / a) * xi
+        vyi = (self.fy_for_use / a) * (-sph * sth * vxw - cph * sth * vzw) - (a_dot / a) * yi
 
         pixel_velocity = world_velocity.copy()
         pixel_velocity[:, 0] = vxi
         pixel_velocity[:, 1] = vyi
 
+        pixel_dets = pixel_dets.reshape(original_shape)
         pixel_velocity = pixel_velocity.reshape(v_original_shape)
+        
 
-        return pixel_velocity
+        return pixel_dets, pixel_velocity
+    
 
+    def project_velocity_from_pixel_to_world(self, pixel_dets, pixel_velocity):
+        """
+        Map velocity from world to pixel.
+        pixel_dets: numpy.ndarray, shape=(#dets, 4 or more), or shape=(4 or more), first 4 columns are xi, yi, wi, hi
+        pixel_velocity: numpy.ndarray, shape=(#velocities, 2 or more), or shape=(2 or more), first 2 columns are vxi, vyi
+        """
+        original_shape = pixel_dets.shape
+        if len(original_shape) == 1 and original_shape[0] >= 4:   
+            pixel_dets = pixel_dets.reshape(1, -1)  # (dets, 4 or more)
+
+        v_original_shape = pixel_velocity.shape
+        if len(v_original_shape) == 1 and v_original_shape[0] >= 2:   
+            pixel_velocity = pixel_velocity.reshape(1, -1)  # (dets, 2 or more)
+
+        # get location at world coordinate
+        world_dets = self.project_from_pixel_to_world(pixel_dets)  # (dets, 4 or more)
+
+        # prepare
+        cth, sth = np.cos(self.theta), np.sin(self.theta)
+        cph, sph = np.cos(self.phi), np.sin(self.phi)
+        yw = max(self.height, 1e-6)
+        xw = world_dets[:, 0]
+        zw = world_dets[:, 1]
+        yi = pixel_dets[:, 1] - self.process_img_h * 0.5
+        fx = max(self.fx_for_use, 1e-6)
+        fy = max(self.fy_for_use, 1e-6)
+        v = yi / fy
+        vxi = pixel_velocity[:, 0]
+        vyi = pixel_velocity[:, 1]
+
+        # plane intersection scale
+        denom = cth * v + sth
+        denom = np.where(np.abs(denom) < 1e-6, np.sign(denom) * 1e-6, denom)
+        a = yw / denom
+        a = np.where(np.abs(a) < 1e-6, np.sign(a) * 1e-6, a)  # prevent zero division
+
+        a_dot = -(a**2 * cth * vyi) / (yw * fy)  
+        vxw = a * (cph * vxi / fx - sph * sth * vyi / fy) + (a_dot / a) * xw
+        vzw = a * (-sph * vxi / fx - cph * sth * vyi / fy) + (a_dot / a) *zw
+
+        world_velocity = pixel_velocity.copy()
+        world_velocity[:, 0] = vxw
+        world_velocity[:, 1] = vzw
+
+        world_dets = world_dets.reshape(original_shape)
+        world_velocity = world_velocity.reshape(v_original_shape)
+
+
+        return world_dets, world_velocity
+    
+
+    def cal_stable_height(self, height):
+        # return stable height 
+        # add to window
+        if height < 1.0:  # small height like '0' is abnormal
+            if len(self.stat_window) == 0:  # no cached data
+                return None
+            else:
+                median_val = np.median(self.stat_window)
+                return median_val
+        
+        self.stat_window.append(height)
+
+        # compute rolling median
+        median_val = np.median(self.stat_window)
+        
+        return median_val
 
         
 

@@ -253,7 +253,7 @@ class OCSort(object):
 
         # project from world coordinate to pixel coordinate
         if projector is not None:
-            trks = projector.project_from_world_to_pixel(trks, use_prev_gimbal=False)
+            trks = projector.project_from_world_to_pixel(trks)
 
     
         # 1st round association(trackers vs high score detections)
@@ -455,27 +455,63 @@ class OCSort(object):
                               projector, 
                               theta, 
                               phi, 
-                              zoom):
+                              zoom,
+                              height):
+        
         if projector is None:
             return self._return_trackers()
         
-        # load trackers 3d world state
-        trks = np.zeros((len(self.trackers), 5), dtype=np.float32)  # world, (#trks, 5), cx, cy, w, h, id
+        theta_before = projector.theta
+        phi_before = projector.phi
+        zoom_before = projector.zoom
+        height_before = projector.height
+        
         for i in range(len(self.trackers)):
-            cx, cy, w, h, id = self.trackers[i].get_state_with_id()
-            trks[i] = np.array([cx, cy, w, h, id], dtype=np.float32)
+            # =====change the gimbal status(old)=====
+            projector.set_gimbal_status(theta=theta_before, phi=phi_before, zoom=zoom_before, height=height_before)
 
-        # project to pixel world  by using gimbal status saved in 'projector'
-        trks = projector.project_from_world_to_pixel(trks)  # pixel, (#trks, 5), cx, cy, w, h, id
-        
-        # project to 3d world by using correct gimbal status
-        projector.set_gimbal_status(theta=theta, phi=phi, zoom=zoom)
-        trks = projector.project_from_pixel_to_world(trks)  # world, (#trks, 5), cx, cy, w, h, id
-        
-        # set new 3d world location directly to trackers
-        for i in range(len(self.trackers)):
-            cx, cy, w, h, id = trks[i]
-            self.trackers[i].set_state(cx, cy, w, h)
+            # =====part 1: from world to pixel=====
+            # ===state x===
+            world_det = self.trackers[i].get_state()  # load 3d world detection, shape (4,) = (xw, zw, ww, hh)
+            world_velocity = self.trackers[i].get_velocity()  # load 3d world velocity, shape (2,) = (vxw, vzw)
+            pixel_det, pixel_velocity = projector.project_velocity_from_world_to_pixel(world_det, world_velocity)
+            # ===last observed z===
+            world_det_last_ob = self.trackers[i].get_last_observed_z()  # shape (4,) = (xw, zw, ww, hh)
+            pixel_det_last_ob = projector.project_from_world_to_pixel(world_det_last_ob)
+            # ===last observed buffer===
+            last_z_buffer = self.trackers[i].get_last_z_buffer()  # deque
+            for j, ele in enumerate(last_z_buffer):
+                if ele is None:
+                    continue
+                elif isinstance(ele, np.ndarray):  # (4, 1), xywh
+                    new_ele = projector.project_from_world_to_pixel(ele.flatten())  # (4, )
+                    last_z_buffer[j] = new_ele.reshape(ele.shape)  # (4, 1)
+                else:
+                    pass
+
+            # =====change the gimbal status(new/correct)=====
+            projector.set_gimbal_status(theta=theta, phi=phi, zoom=zoom, height=height)
+
+            # =====part 2: from pixel to world=====
+            # ===state x===
+            new_world_det, new_world_velocity = projector.project_velocity_from_pixel_to_world(pixel_det, pixel_velocity)
+            self.trackers[i].set_state(new_world_det[0], new_world_det[1], new_world_det[2], new_world_det[3])
+            self.trackers[i].set_velocity(new_world_velocity[0], new_world_velocity[1])
+            # ===last observed z===
+            new_world_det_last_ob = projector.project_from_pixel_to_world(pixel_det_last_ob)
+            self.trackers[i].set_last_observed_z(new_world_det_last_ob[0], new_world_det_last_ob[1], 
+                                                 new_world_det_last_ob[2], new_world_det_last_ob[3])
+            # ===last observed buffer===
+            for j, ele in enumerate(last_z_buffer):
+                if ele is None:
+                    continue
+                elif isinstance(ele, np.ndarray):  # (4, 1), xywh
+                    new_ele = projector.project_from_pixel_to_world(ele.flatten())
+                    last_z_buffer[j] = new_ele.reshape(ele.shape)
+                else:
+                    pass
+            self.trackers[i].set_last_z_buffer(last_z_buffer)
+
 
         return self._return_trackers()
 

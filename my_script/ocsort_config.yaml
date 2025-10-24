@@ -60,7 +60,7 @@ EfficientReIDStrategy:
   det_thresh: 0.7
   
 CMC:
-  min_features: 30
+  min_features: 10
   method: "optflow"  # "optflow" or "orb"
   # ui_mask: "./ui_mask.jpg"
   ui_mask: ""
@@ -72,16 +72,15 @@ PROJECTOR:
   fy: 5783.2
   calibration_w: 8000.0
   calibration_h: 6000.0
-  h: 165.0
   
   
 EXP:
   # img_foler: "imgs/screen-20250422-150828_seg_2"
-  img_foler: "test_gimbal_data/test_frames/0006_W"
+  img_foler: "test_gimbal_data/test_frames/0003_W"
   resize_ratio: 0.75
   use_cmc: False
   use_efficient_strategy: True
   use_projector: True
-  gimbal_status_file: "test_gimbal_data/test_csv/0006_W.csv"
+  gimbal_status_file: "test_gimbal_data/test_csv/0003_W.csv"
 
 

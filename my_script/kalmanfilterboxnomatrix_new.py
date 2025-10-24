@@ -1,4 +1,5 @@
 from collections import deque
+import warnings
 
 import numpy as np
 from utils import exp_saturate_by_age
@@ -56,7 +57,7 @@ class KalmanFilterBoxTrackerNoMatrix():
         self.age = 0  # number of frames track has existed after initialization
         self.consecutive_missed_frames = 0  # number of frames since last successful update
         self.consecutive_hits = 1  # # number of consecutive frames with successful updates
-        self.last_z_buffer = deque(maxlen=delta_t)  # hold last "delta_t+1" observations
+        self.last_z_buffer = deque(maxlen=delta_t)  # hold last "delta_t+1" observations, element is either shape (4,1) or None
         self.v_direction = np.array([0, 0], dtype=np.float32)  # velocity direction estimated by observations
 
         self.id = KalmanFilterBoxTrackerNoMatrix.count + 1  # start from 1
@@ -124,7 +125,7 @@ class KalmanFilterBoxTrackerNoMatrix():
         dh = (h2-h1) / age_gap
 
         # last observed state saved is actually prior state(result of prediction)
-        # udpate -> predict -> update -> .. update -> predict
+        # udpate -> predict -> update -> predict -> ... update -> predict
         # since we will do z updating normally in self.update() later on
         self.x = self.last_observed_x
         self.P = self.last_observed_P
@@ -150,15 +151,78 @@ class KalmanFilterBoxTrackerNoMatrix():
                     break
         # still not found then resort to self.last_observed_z
         if prev_z is None and self.last_observed_z is not None:
-            prev_z = self.last_observed_z
+            prev_z = self.last_observed_z  # x, y, s, r
 
         return prev_z
+    
+    def get_state_with_id(self):
+        cx, cy, w, h = self._cxcysr2cxcywh(self.x[:4].flatten())
+        id = self.id
+
+        return np.array([cx, cy, w, h, id], dtype=np.float32)
+    
+    def get_state(self):
+        cx, cy, w, h = self._cxcysr2cxcywh(self.x[:4].flatten())
+
+        return np.array([cx, cy, w, h], dtype=np.float32)
+    
+    def set_state(self, cx, cy, w, h):
+        cx, cy, s, r = self._cxcywh2cxcysr(np.array([cx, cy, w, h], dtype=np.float32))
+        self.x[:4] = np.array([cx, cy, s, r]).reshape(4, 1)
+
+    def get_velocity(self):
+        vx = self.x.flatten()[4]
+        vy = self.x.flatten()[5]
+        return np.array([vx, vy], dtype=np.float32)
+    
+    def set_velocity(self, vx, vy):
+        self.x[4:6] = np.array([vx, vy]).reshape(2, 1)
     
     def get_last_observed_z(self):
         ret = self.last_observed_z
         if ret is not None:
             ret = self._cxcysr2cxcywh(ret.flatten())
         return ret
+    
+    def set_last_observed_z(self, cx, cy, w, h):
+        cxcysr = self._cxcywh2cxcysr(np.array([cx, cy, w, h]))  # shape=(4,)
+        shape = self.last_observed_z.shape
+        self.last_observed_z = cxcysr.reshape(shape)
+
+    def get_last_z_buffer(self):
+        # return deep copy of 'self.last_z_buffer'
+        ret = deque(maxlen=self.last_z_buffer.maxlen)
+        for ele in self.last_z_buffer:
+            if ele is None:
+                ret.append(ele)
+            elif isinstance(ele, np.ndarray):
+                ele = self._cxcysr2cxcywh(ele)  # xysr -> xywh
+                ret.append(ele)
+            else:
+                raise ValueError(f"self.last_z_buffer has element of invalid type: {type(ele)}!")
+        
+        return ret
+    
+    def set_last_z_buffer(self, last_z_buffer):
+        if not isinstance(last_z_buffer, deque) and not isinstance(last_z_buffer, list):
+            warnings.warn(f"invalid type of 'last_z_buffer': {type(last_z_buffer)}!")
+            return 
+
+        if len(last_z_buffer) != len(self.last_z_buffer):
+            warnings.warn(f"need 'len(last_z_buffer)' to be {len(self.last_z_buffer)} while it's {len(last_z_buffer)}!")
+            return
+        
+        for i, ele in enumerate(last_z_buffer):
+            if ele is None:
+                self.last_z_buffer[i] = None
+            elif isinstance(ele, np.ndarray):
+                shape = self.last_z_buffer[i].shape
+                ele = self._cxcywh2cxcysr(ele)  # xywh -> xysr
+                self.last_z_buffer[i] = ele.reshape(shape)
+            else:
+                pass  # invalid element
+
+
 
     def _estimate_speed_direction(self, z):
         curr_z = z
@@ -259,20 +323,7 @@ class KalmanFilterBoxTrackerNoMatrix():
 
         return ret_state  # (4,) cxcywh
 
-    def get_state_with_id(self):
-        cx, cy, w, h = self._cxcysr2cxcywh(self.x[:4].flatten())
-        id = self.id
-
-        return np.array([cx, cy, w, h, id], dtype=np.float32)
     
-    def get_state(self):
-        cx, cy, w, h = self._cxcysr2cxcywh(self.x[:4].flatten())
-
-        return np.array([cx, cy, w, h], dtype=np.float32)
-    
-    def set_state(self, cx, cy, w, h):
-        cx, cy, s, r = self._cxcywh2cxcysr(np.array([cx, cy, w, h], dtype=np.float32))
-        self.x[:4] = np.array([cx, cy, s, r]).reshape(4, 1)
     
     def _cxcywh2cxcysr(self, cxcywh):
         cx, cy, w, h = cxcywh.flatten()

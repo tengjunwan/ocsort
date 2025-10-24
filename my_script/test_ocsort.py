@@ -60,38 +60,110 @@ def get_color(idx, less_saturate=False):
     return color
 
 
-def draw_info(image, info, color=(0, 0, 255)):
-    H, W = image.shape[:2]
+# def draw_info(image, info, color=(0, 0, 255)):
+#     H, W = image.shape[:2]
+#     font = cv2.FONT_HERSHEY_SIMPLEX
+#     font_scale = 0.5
+#     thickness = 2
+#     line_height = 18
+
+#     # Convert info to display strings
+#     lines = []
+#     for key, val in info.items():
+#         if isinstance(val, (list, tuple, np.ndarray)) and len(val) == 2:
+#             line = f"{key}: ({val[0]:.1f}, {val[1]:.1f})"
+#         elif isinstance(val, float) or isinstance(val, int):
+#             # Choose formatting based on key
+#             if "zoom" in key.lower():
+#                 line = f"{key}: x{val:.2f}"
+#             elif "rot" in key.lower():
+#                 line = f"{key}: {val:.1f} deg"
+#             else:
+#                 line = f"{key}: {val:.3f}"
+#         else:
+#             line = f"{key}: {val}"
+#         lines.append(line)
+
+#     # Draw lines from top-right corner downward
+#     for i, text in enumerate(lines):
+#         text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+#         x = W - text_size[0] - 10  # Right-align
+#         y = 10 + i * line_height
+#         cv2.putText(image, text, (x, y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
+
+#     return image  # Optional: return it if you want to chain ops
+
+
+def draw_info(image, info, color=(255, 255, 255),
+              bg_color=(0, 0, 0), alpha=0.5,
+              margin=10, padding=8):
+    """
+    Draw a semi-transparent info panel (top-right) and put text on it.
+
+    Args:
+        image: HxWxC BGR image (uint8).
+        info: dict -> values can be numbers, (x,y), lists, strings, etc.
+        color: BGR text color.
+        bg_color: BGR background panel color.
+        alpha: panel opacity (0..1), larger = more opaque.
+        margin: pixels from image edge.
+        padding: inner padding inside the panel.
+
+    Returns:
+        Modified image (same array mutated and also returned).
+    """
+    img = image
+    H, W = img.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.5
-    thickness = 2
-    line_height = 18
+    thickness = 1
+    line_height = 18  # vertical spacing between baselines
 
-    # Convert info to display strings
+    # --- build display lines with your formatting rules ---
     lines = []
     for key, val in info.items():
         if isinstance(val, (list, tuple, np.ndarray)) and len(val) == 2:
-            line = f"{key}: ({val[0]:.1f}, {val[1]:.1f})"
-        elif isinstance(val, float) or isinstance(val, int):
-            # Choose formatting based on key
+            line = f"{key}: ({float(val[0]):.1f}, {float(val[1]):.1f})"
+        elif isinstance(val, (float, int, np.floating, np.integer)):
             if "zoom" in key.lower():
-                line = f"{key}: x{val:.2f}"
+                line = f"{key}: x{float(val):.2f}"
             elif "rot" in key.lower():
-                line = f"{key}: {val:.1f} deg"
+                line = f"{key}: {float(val):.1f} deg"
             else:
-                line = f"{key}: {val:.3f}"
+                line = f"{key}: {float(val):.3f}"
         else:
             line = f"{key}: {val}"
         lines.append(line)
 
-    # Draw lines from top-right corner downward
-    for i, text in enumerate(lines):
-        text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
-        x = W - text_size[0] - 10  # Right-align
-        y = 10 + i * line_height
-        cv2.putText(image, text, (x, y), font, font_scale, color, thickness, lineType=cv2.LINE_AA)
+    if not lines:
+        return img
 
-    return image  # Optional: return it if you want to chain ops
+    # --- measure text to size the panel ---
+    widths = [cv2.getTextSize(t, font, font_scale, thickness)[0][0] for t in lines]
+    max_w = max(widths)
+    total_h = len(lines) * line_height
+
+    x1 = W - margin                      # panel right
+    x0 = x1 - (max_w + 2 * padding)      # panel left
+    y0 = margin                          # panel top
+    y1 = y0 + (total_h + 2 * padding)    # panel bottom
+
+    x0 = max(0, x0)
+    y0 = max(0, y0)
+
+    # --- draw semi-transparent panel ---
+    overlay = img.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), bg_color, thickness=-1)
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, dst=img)
+
+    # --- draw right-aligned text over panel ---
+    for i, (text, tw) in enumerate(zip(lines, widths)):
+        baseline_y = y0 + padding + (i + 1) * line_height - (line_height - 12)  # slight optical tweak
+        text_x = x1 - padding - tw  # right align
+        cv2.putText(img, text, (text_x, baseline_y), font, font_scale, color,
+                    thickness, lineType=cv2.LINE_AA)
+
+    return img
 
 
 # load camera motion compensator
@@ -145,10 +217,12 @@ debug_thirdAssign_save_folder = Path("vis_thirdAssign")
 debug_newlyCreate_save_folder = Path("vis_newlyCreate")
 debug_newlyDelete_save_folder = Path("vis_newlyDelete")
 debug_app_matrix = Path("vis_app_matrix")
+debug_project_save_folder = Path("vis_project")
 for folder in [trk_save_folder, det_save_folder, debug_pred_save_folder, debug_vdir_save_folder,
                 debug_lastOb_save_folder, debug_prevCenter_save_folder, debug_firstAssign_save_folder,
                 debug_secondAssign_save_folder, debug_thirdAssign_save_folder,
-                debug_newlyCreate_save_folder, debug_newlyDelete_save_folder, debug_app_matrix]:
+                debug_newlyCreate_save_folder, debug_newlyDelete_save_folder, debug_app_matrix,
+                debug_project_save_folder]:
     if folder.exists():
         shutil.rmtree(folder)
     folder.mkdir()
@@ -162,18 +236,24 @@ resize_ratio = config["EXP"]["resize_ratio"]
 use_cmc = config["EXP"]["use_cmc"]
 
 
-cumu_d_phi_deg = 0.0
-cumu_d_theta_deg = 0.0
-phi_deg_error_thresh = 2.0
-theta_deg_error_thresh = 1.0
+
+cal_yaw_delta_deg = 0.0
+cal_pitch_delta_deg = 0.0
+yaw_diff_thresh_deg = 2.0
+pitch_diff_thresh_deg = 1.0
+height_diff_thresh = 5.0
+xws = [None] * len(img_paths)
+zws = [None] * len(img_paths)
+use_height = None
 for idx_img, img_path in enumerate(img_paths):
-    if idx_img < 15:
+    if idx_img < 25 or idx_img > 1000:
+    # if idx_img < 25 or idx_img > 100:
         continue
     
     img_id = int(img_path.stem)
-    if img_id == 101 or img_id == 102:
+    if img_id == 83 or img_id == 84:
         print("debug")
-    print(f"processing {idx_img+1}/{num_images} img: {img_path}")
+    print(f"=========processing {idx_img+1}/{num_images} img: {img_path}=========")
 
 
     img = cv2.imread(img_path)
@@ -214,14 +294,14 @@ for idx_img, img_path in enumerate(img_paths):
     # load gimbal status
     if projector is not None:
         # load gimbal status from csv file
-        lag_frame = 9
+        lag_frame = 18
         line = csv_content[idx_img - lag_frame]
         pitch_abs_deg = float(line[1]) * (-1)
         pitch_delta_deg = float(line[2]) * (-1)
         yaw_abs_deg = float(line[3])
         yaw_delta_deg = float(line[4])
         zoom  = float(line[7]) * 3  # need '*3' since logging is somehow not correct
-        raser_distance = float(line[8])    
+        raser_distance = float(line[8])
 
         # CMC
         curr_affine_matrix = cmc.update(img, det_results)
@@ -233,36 +313,49 @@ for idx_img, img_path in enumerate(img_paths):
         process_img_h, process_img_w = img.shape[:2]
         projector.set_process_img_shape(process_img_w, process_img_h)
 
+        # calculate height
+        load_height = raser_distance * np.sin(np.deg2rad(pitch_abs_deg + pitch_delta_deg))
+        stable_height = projector.cal_stable_height(load_height)
+        if use_height is None:
+            if stable_height is None:
+                use_height = 100  # fake height
+            else:
+                use_height = stable_height 
+
+
         # set initial gimbal status
         if not projector.gimbal_status_is_initialized:
-            projector.init_gimbal_status(theta=np.deg2rad(pitch_abs_deg + pitch_delta_deg), phi=np.deg2rad(yaw_abs_deg + yaw_delta_deg), zoom=zoom)
+            projector.init_gimbal_status(theta=np.deg2rad(pitch_abs_deg + pitch_delta_deg), 
+                                         phi=np.deg2rad(yaw_abs_deg + yaw_delta_deg), 
+                                         zoom=zoom,
+                                         height=use_height)
 
         # =========method A: use dφ dθ calculated by Image=========
-        d_phi_rad, d_theta_rad = projector.calculate_dphi_and_dtheta(dx, dy)  # radian
-        d_phi_deg, d_theta_deg = np.rad2deg(d_phi_rad), np.rad2deg(d_theta_rad)
+        cal_yaw_delta_rad_between_2_consec_frames, cal_pitch_delta_rad_between_2_consec_frames = \
+            projector.calculate_dphi_and_dtheta(dx, dy)  # radian
+        cal_yaw_delta_deg_between_2_consec_frames, cal_pitch_delta_deg_between_2_consec_frames = \
+            np.rad2deg(cal_yaw_delta_rad_between_2_consec_frames), np.rad2deg(cal_pitch_delta_rad_between_2_consec_frames)
 
-        cumu_d_phi_deg += d_phi_deg
-        cumu_d_theta_deg += d_theta_deg
+        cal_yaw_delta_deg += cal_yaw_delta_deg_between_2_consec_frames
+        cal_pitch_delta_deg += cal_pitch_delta_deg_between_2_consec_frames
 
         # set gimbal status
-        projector.set_gimbal_status(theta=np.deg2rad(pitch_abs_deg + cumu_d_theta_deg), 
-                                    phi=np.deg2rad(yaw_abs_deg + cumu_d_phi_deg), 
-                                    zoom=zoom)
+        projector.set_gimbal_status(theta=np.deg2rad(pitch_abs_deg + cal_pitch_delta_deg),  # 
+                                    phi=np.deg2rad(yaw_abs_deg + cal_yaw_delta_deg), 
+                                    zoom=zoom,
+                                    )
 
         # check error is big enough and if big enough, force it to be equal to log value
-        d_phi_deg_diff = abs(cumu_d_phi_deg - yaw_delta_deg)  
-        d_theta_deg_diff = abs(cumu_d_theta_deg - pitch_delta_deg)
-        print(f"cumulative error Δφ: {d_phi_deg_diff:.4f}, cumulative error Δθ: {d_theta_deg_diff:.4f}")
+        yaw_diff_deg = abs(cal_yaw_delta_deg - yaw_delta_deg)  
+        pitch_diff_deg = abs(cal_pitch_delta_deg - pitch_delta_deg)
+        height_diff = abs(use_height - stable_height)
+        print(f"cumulative error Δφ: {yaw_diff_deg:.4f}, cumulative error Δθ: {pitch_diff_deg:.4f}")
+        print(f"height diff Δh: {height_diff:.4f}")
 
-        gimbal_status_is_corrected = False
-        if d_phi_deg_diff > phi_deg_error_thresh or d_theta_deg_diff > theta_deg_error_thresh:
-            cumu_d_phi_deg = yaw_delta_deg
-            cumu_d_theta_deg = pitch_delta_deg
-            gimbal_status_is_corrected = True
-
-        # # =========method B: use dφ dθ directly by log=========
-        # # set gimbal status
-        # projector.set_gimbal_status(theta=np.deg2rad(pitch_abs_deg + pitch_delta_deg), phi=np.deg2rad(yaw_abs_deg + yaw_delta_deg), zoom=zoom)
+        gimbal_status_need_to_be_corrected = False
+        if yaw_diff_deg > yaw_diff_thresh_deg or pitch_diff_deg > pitch_diff_thresh_deg or height_diff > height_diff_thresh:
+            gimbal_status_need_to_be_corrected = True
+        print(f"gimbal status need to be corrected: {gimbal_status_need_to_be_corrected}")
 
     # track
     debug_mode = True
@@ -272,18 +365,22 @@ for idx_img, img_path in enumerate(img_paths):
         rtn_tracks = tracker.update(global_det_results, det_feats, def_feats_mask, projector, debug_mode)
 
     # correct trackers in 3d world due to sudden change of gimbal status
-    if gimbal_status_is_corrected:
+    if gimbal_status_need_to_be_corrected:
+        cal_yaw_delta_deg = yaw_delta_deg
+        cal_pitch_delta_deg = pitch_delta_deg
+        use_height = stable_height
         rtn_tracks = tracker.correct_gimbal_status(projector,  
-                                                    theta=np.deg2rad(pitch_abs_deg + pitch_delta_deg), 
-                                                    phi=np.deg2rad(yaw_abs_deg + yaw_delta_deg), 
-                                                    zoom=zoom)
+                                                    theta=np.deg2rad(pitch_abs_deg + cal_pitch_delta_deg), 
+                                                    phi=np.deg2rad(yaw_abs_deg + cal_yaw_delta_deg), 
+                                                    zoom=zoom,
+                                                    height=use_height)
 
     
 
     # set target id
     target_awareness = True
     if target_awareness:
-        target_id = 4
+        target_id = 13
         tracker.set_target(target_id)
 
 
@@ -318,10 +415,13 @@ for idx_img, img_path in enumerate(img_paths):
     # draw gimbal status info
     if use_projector:
         gimbal_info = {
-            "pitch(deg)": pitch_abs_deg+pitch_delta_deg, 
-            "yaw(deg)": yaw_abs_deg+yaw_delta_deg,
+            "pitch(deg)": pitch_abs_deg+cal_pitch_delta_deg, 
+            "yaw(deg)": yaw_abs_deg+cal_yaw_delta_deg,
             "zoom": zoom,
-            "raserDis": raser_distance,
+            "raserDis(m)": raser_distance,
+            "height(m)": use_height,
+            "dx(pix)": dx,
+            "dy(pix)": dy,
             }
         draw_info(img_vis_trk, gimbal_info)
 
@@ -345,9 +445,11 @@ for idx_img, img_path in enumerate(img_paths):
             cv2.circle(img_vis_trk, (int(cx), int(cy)), radius=5, color=(0,0,255), thickness=-1)
 
     # draw trackers
-    scale = 10
     for trk in rtn_tracks:
         if projector is not None:
+            if int(trk.id) == target_id:
+                xws[idx_img] = trk.cx
+                zws[idx_img] = trk.cy
             trk_cx, trk_cy, trk_w, trk_h = projector.project_from_world_to_pixel(np.array([trk.cx, trk.cy, trk.w, trk.h]))
         else:
             trk_cx, trk_cy, trk_w, trk_h = trk.cx, trk.cy, trk.w, trk.h
@@ -365,10 +467,13 @@ for idx_img, img_path in enumerate(img_paths):
         
         # draw velocity
         if projector is not None:
-            trk_vx, trk_vy = projector.project_velocity_from_world_to_pixel(np.array([trk.cx, trk.cy, trk.w, trk.h]),
-                                                                            np.array([trk.vx, trk.vy]))
+            pixel_location, pixel_velocity = projector.project_velocity_from_world_to_pixel(np.array([trk.cx, trk.cy, trk.w, trk.h]),
+                                                                            np.array([trk.vx, trk.vy]))  # only need its direction
+            trk_vx, trk_vy = pixel_velocity
+            scale = 200 * (trk.vx**2 + trk.vy**2)**0.5/ ((trk_vx**2 + trk_vy**2)**0.5 + 1e-16)  # proportional to real speed in 3d world
         else:
             trk_vx, trk_vy = trk.vx, trk.vy
+            scale = 10
         cx = int(trk_cx)
         cy = int(trk_cy)
         end_x = int(trk_cx + scale * trk_vx)
@@ -377,8 +482,13 @@ for idx_img, img_path in enumerate(img_paths):
                         color=color, thickness=2, tipLength=0.3)
         
         # Calculate the velocity magnitude
-        magnitude = (trk.vx**2 + trk.vy**2)**0.5
-        magnitude_label = f"{magnitude:.2f}"
+        if projector is not None:
+            magnitude = (trk.vx**2 + trk.vy**2)**0.5  # unit: m/frame
+            magnitude = magnitude * 25 * 3.6  # unit: km/h, fps=25
+            magnitude_label = f"{magnitude:.2f} km/h"
+        else:
+            magnitude = (trk.vx**2 + trk.vy**2)**0.5
+            magnitude_label = f"{magnitude:.2f}"
 
         text_x = cx
         text_y = cy + 15  # shift downward; adjust value as needed
@@ -388,7 +498,7 @@ for idx_img, img_path in enumerate(img_paths):
         
         # draw similarity
         update_similarity = trk.update_similarity
-        label = f" {update_similarity:.2f}"
+        label = f"sm: {update_similarity:.2f}"
         cv2.putText(img_vis_trk, label, (x1, y2 - 5), cv2.FONT_HERSHEY_SIMPLEX, 
                     0.5, color, 2)
         
@@ -453,6 +563,89 @@ for idx_img, img_path in enumerate(img_paths):
     # app_matrix = appearance_batch(det_feats, trk_feats)
     # app_vis_save_path = debug_app_matrix / img_path.name
     # save_app_matrix_heatmap(app_matrix, trk_ids, str(app_vis_save_path))
+
+if projector is not None:
+    print("drawing world map...")
+    assert len(xws) == len(zws), "something wrong"
+    slice_len = 5
+    overlap = 1
+    num_slice = int(np.ceil(len(xws) / slice_len))
+
+    # formatting & style
+    DEC_PLACES = 1       # use 1 decimal place; set to 3 if you want more detail
+    FS_IDX = 7           # font size for index
+    FS_COORD = 4         # font size for coordinate
+
+
+    for i_slice in range(num_slice):
+        s_slice = max(i_slice * slice_len - overlap, 0)
+        # s_slice = 0
+        e_slice = min((i_slice + 1) * slice_len + overlap, len(xws))
+
+        xws_slice = xws[s_slice: e_slice]
+        zws_slice = zws[s_slice: e_slice]
+
+        xws_slice_valid = [x for x, z in zip(xws_slice, zws_slice) if x is not None and z is not None]
+        zws_slice_valid = [z for x, z in zip(xws_slice, zws_slice) if x is not None and z is not None]
+        index_valid = [idx for idx, (x, z) in zip(range(s_slice, e_slice), zip(xws_slice, zws_slice)) if x is not None and z is not None]
+        
+
+        if len(xws_slice_valid) == 0 or len(zws_slice_valid) == 0:
+            continue
+
+        plt.figure()
+        plt.plot(xws_slice_valid, zws_slice_valid, 'o-', color='blue', markersize=3)
+
+        # --- index above, coordinate below (two lines) ---
+        fmt = f"(.{DEC_PLACES}f)"
+        for xv, zv, idx in zip(xws_slice_valid, zws_slice_valid, index_valid):
+            # index (top)
+            plt.annotate(
+                str(idx),
+                (xv, zv),
+                textcoords="offset points",
+                xytext=(0, 6),     # small upward offset
+                ha="center",
+                va="bottom",
+                fontsize=FS_IDX,
+                color="black",
+                clip_on=True,
+            )
+            # coordinates (bottom)
+            plt.annotate(
+                f"({xv:.{DEC_PLACES}f}, {zv:.{DEC_PLACES}f})",
+                (xv, zv),
+                textcoords="offset points",
+                xytext=(0, -10),   # small downward offset
+                ha="center",
+                va="top",
+                fontsize=FS_COORD,
+                color="black",
+                clip_on=True,
+            )
+        # --------------------------------------------------
+            
+        plt.xlabel("Xw (m)")
+        plt.ylabel("Zw (m)")
+        plt.title("Projected world trajectory of target car")
+        plt.axis("equal")
+        plt.grid(True)
+        plt.savefig(str(debug_project_save_folder / f"world_trajectory_{s_slice}To{e_slice-1}.png"), dpi=200)
+        plt.close()
+
+    
+    # draw the whole world map
+    xws_slice = xws 
+    zws_slice = zws 
+    plt.figure()
+    plt.plot(xws_slice, zws_slice, 'o-', color='blue', markersize=3)
+    plt.xlabel("Xw (m)")
+    plt.ylabel("Zw (m)")
+    plt.title("Projected world trajectory of target car")
+    plt.axis("equal")
+    plt.grid(True)
+    plt.savefig(str(debug_project_save_folder / f"world_trajectory.png"), dpi=200)
+    plt.close()
 
 
 
