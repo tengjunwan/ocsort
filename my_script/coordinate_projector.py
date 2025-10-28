@@ -2,6 +2,14 @@ from collections import deque
 
 import numpy as np
 
+def _nz(x, eps=1e-6):
+    """
+    Safe non-zero: replace very small values with ±eps, preserving sign.
+    For x == 0, use +eps.
+    Works elementwise for numpy scalars/arrays.
+    """
+    return np.where(np.abs(x) < eps, eps * np.where(x >= 0, 1.0, -1.0), x)
+
 
 class CoordinateProjector():
     """
@@ -16,7 +24,7 @@ class CoordinateProjector():
         self.calibration_h = calibration_h
         
 
-        # gimbal status 
+        # gimbal status
         self.gimbal_status_is_initialized = False  # flag
         self.theta = None  # pitch(rad)
         self.phi = None    # yaw(rad)
@@ -32,7 +40,6 @@ class CoordinateProjector():
 
         # configures for height statistics
         self.stat_window = deque(maxlen=100)
-        self.k = 2  
         
 
     def set_process_img_shape(self, img_w, img_h):
@@ -62,11 +69,12 @@ class CoordinateProjector():
         # dx: pixel translation in x direction(dx = xi+1 - xi) from previous frame to current frame
         # dy: pixel translation in y direction(dy = yi+1 - yi) from previous frame to current frame
 
-        cth = np.cos(self.theta)
-        cth = np.where(np.abs(cth) < 1e-6, np.sign(cth) * 1e-6, cth)
+        fx = _nz(float(self.fx_for_use))
+        fy = _nz(float(self.fy_for_use))
+        cth = _nz(np.cos(self.theta))
 
-        d_theta = -(dy / self.fy_for_use)
-        d_phi = -(dx / self.fx_for_use) / cth
+        d_theta = -(dy / fy)
+        d_phi = -(dx / fx) / cth
 
         return d_phi, d_theta
 
@@ -90,26 +98,27 @@ class CoordinateProjector():
         yi = yi - 0.5 * self.process_img_h
 
         # normalized image coords
-        u = xi / self.fx_for_use
-        v = yi / self.fy_for_use
+        fx = _nz(float(self.fx_for_use))
+        fy = _nz(float(self.fy_for_use))
+        u = xi / fx
+        v = yi / fy
 
         cth, sth = np.cos(self.theta), np.sin(self.theta)
         cph, sph = np.cos(self.phi), np.sin(self.phi)
 
         # plane intersection scale
-        denom = cth * v + sth
-        denom = np.where(np.abs(denom) < 1e-6, np.sign(denom) * 1e-6, denom)
-        a = self.height / denom
+        denom = _nz(cth * v + sth)
+        a = float(self.height) / denom
 
-        # initial-world coordinates (axes fixed to first frame)
+        # === world centers ===
         xw = a * ( cph * u - sph * sth * v + sph * cth )
         zw = a * (-sph * u - cph * sth * v + cph * cth )
 
         # ===part 2: convert w and h from pixel to world===
-        b = self.height / max(sth, 1e-6)
-        ww = wi * b/ self.fx_for_use
-        hw = hi * b/ self.fy_for_use
-
+        sth_safe = _nz(sth)
+        b = float(self.height) / sth_safe
+        ww = wi * b / fx
+        hw = hi * b / fy
 
         world_dets = pixel_dets.copy()
         world_dets[:, 0] = xw
@@ -138,13 +147,13 @@ class CoordinateProjector():
         # ===prepare===
         cth, sth = np.cos(self.theta), np.sin(self.theta)
         cph, sph = np.cos(self.phi), np.sin(self.phi)
-        fx = self.fx_for_use
-        fy = self.fy_for_use
+        fx = _nz(float(self.fx_for_use))
+        fy = _nz(float(self.fy_for_use))
+        yw = float(self.height)
 
         # ===part 1: convert cx and cy from world to pixel===
-        yw = self.height
         a = sph * cth * xw + sth * yw + cph * cth * zw
-        a = np.where(np.abs(a) < 1e-6, np.sign(a) * 1e-6, a)
+        a = _nz(a)
         
         xi = (fx / a) * (cph * xw - sph * zw) 
         xi = xi + 0.5 * self.process_img_w  # top left corner as origin
@@ -152,7 +161,8 @@ class CoordinateProjector():
         yi = yi + 0.5 * self.process_img_h  # top left corner as origin
 
         # ===part 2: convert w and h from world to pixel===
-        b = sth / max(self.height, 1e-6) 
+        h_safe = _nz(yw)
+        b = sth / h_safe
         wi = b * fx * ww
         hi = b * fy * hw
 
@@ -169,9 +179,12 @@ class CoordinateProjector():
 
     def project_velocity_from_world_to_pixel(self, world_dets, world_velocity):
         """
-        Map velocity from world to pixel.
-        world_dets: numpy.ndarray, shape=(#dets, 4 or more), or shape=(4 or more), first 4 columns are xw, zw, ww, hw
-        world_velocity: numpy.ndarray, shape=(#velocities, 2 or more), or shape=(2 or more), first 2 columns are vxw, vyw
+        Map velocity from world to pixel with zero-division safeguards.
+        world_dets: np.ndarray, shape=(#dets, 4 or more) or (4 or more)
+                    first 4 columns are xw, zw, ww, hw
+        world_velocity: np.ndarray, shape=(#vels, 2 or more) or (2 or more)
+                        first 2 columns are vxw, vzw
+        Returns: pixel_dets, pixel_velocity  (same shapes as inputs)
         """
         original_shape = world_dets.shape
         if len(original_shape) == 1 and original_shape[0] >= 4:   
@@ -187,7 +200,9 @@ class CoordinateProjector():
         # prepare
         cth, sth = np.cos(self.theta), np.sin(self.theta)
         cph, sph = np.cos(self.phi), np.sin(self.phi)
-        yw = self.height
+        fx = _nz(float(self.fx_for_use))
+        fy = _nz(float(self.fy_for_use))
+        yw = float(self.height)
         xw = world_dets[:, 0]
         zw = world_dets[:, 1]
         xi = pixel_dets[:, 0] - self.process_img_w * 0.5  # center as origin
@@ -196,12 +211,16 @@ class CoordinateProjector():
         vzw = world_velocity[:, 1]
 
         a = sph * cth * xw + sth * yw + cph * cth * zw
-        a = np.where(np.abs(a) < 1e-6, np.sign(a) * 1e-6, a)  # prevent zero division
+        a = _nz(a)  # prevent zero division
+        
 
         a_dot = sph * cth * vxw + cph * cth * vzw
+        inv_a = 1.0 / a  # safe because a was clamped away from 0
+        a_dot_over_a = a_dot * inv_a
+        
 
-        vxi = (self.fx_for_use / a) * (cph * vxw - sph *vzw) - (a_dot / a) * xi
-        vyi = (self.fy_for_use / a) * (-sph * sth * vxw - cph * sth * vzw) - (a_dot / a) * yi
+        vxi = (fx * inv_a) * (cph * vxw - sph * vzw) - a_dot_over_a * xi
+        vyi = (fy * inv_a) * (-sph * sth * vxw - cph * sth * vzw) - a_dot_over_a * yi
 
         pixel_velocity = world_velocity.copy()
         pixel_velocity[:, 0] = vxi
@@ -213,12 +232,14 @@ class CoordinateProjector():
 
         return pixel_dets, pixel_velocity
     
-
     def project_velocity_from_pixel_to_world(self, pixel_dets, pixel_velocity):
         """
-        Map velocity from world to pixel.
-        pixel_dets: numpy.ndarray, shape=(#dets, 4 or more), or shape=(4 or more), first 4 columns are xi, yi, wi, hi
-        pixel_velocity: numpy.ndarray, shape=(#velocities, 2 or more), or shape=(2 or more), first 2 columns are vxi, vyi
+        Map velocity from pixel to world with zero-division safeguards.
+        pixel_dets: np.ndarray, shape=(#dets, 4 or more) or (4 or more)
+                    first 4 columns are xi, yi, wi, hi
+        pixel_velocity: np.ndarray, shape=(#vels, 2 or more) or (2 or more)
+                        first 2 columns are vxi, vyi
+        Returns: world_dets, world_velocity  (same shapes as inputs)
         """
         original_shape = pixel_dets.shape
         if len(original_shape) == 1 and original_shape[0] >= 4:   
@@ -234,25 +255,27 @@ class CoordinateProjector():
         # prepare
         cth, sth = np.cos(self.theta), np.sin(self.theta)
         cph, sph = np.cos(self.phi), np.sin(self.phi)
-        yw = max(self.height, 1e-6)
         xw = world_dets[:, 0]
         zw = world_dets[:, 1]
         yi = pixel_dets[:, 1] - self.process_img_h * 0.5
-        fx = max(self.fx_for_use, 1e-6)
-        fy = max(self.fy_for_use, 1e-6)
+        fx = _nz(float(self.fx_for_use))
+        fy = _nz(float(self.fy_for_use))
+        yw = _nz(float(self.height))
         v = yi / fy
         vxi = pixel_velocity[:, 0]
         vyi = pixel_velocity[:, 1]
 
         # plane intersection scale
         denom = cth * v + sth
-        denom = np.where(np.abs(denom) < 1e-6, np.sign(denom) * 1e-6, denom)
+        denom = _nz(denom)  
         a = yw / denom
-        a = np.where(np.abs(a) < 1e-6, np.sign(a) * 1e-6, a)  # prevent zero division
+        a = _nz(a)
+        inv_a = 1.0 / a 
 
         a_dot = -(a**2 * cth * vyi) / (yw * fy)  
-        vxw = a * (cph * vxi / fx - sph * sth * vyi / fy) + (a_dot / a) * xw
-        vzw = a * (-sph * vxi / fx - cph * sth * vyi / fy) + (a_dot / a) *zw
+        a_dot_over_a = a_dot * inv_a
+        vxw = a * (cph * (vxi / fx) - sph * sth * (vyi / fy)) + a_dot_over_a * xw
+        vzw = a * (-sph * (vxi / fx) - cph * sth * (vyi / fy)) + a_dot_over_a * zw
 
         world_velocity = pixel_velocity.copy()
         world_velocity[:, 0] = vxw

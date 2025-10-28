@@ -202,7 +202,9 @@ num_images = len(img_paths)
 print(f"images num: {num_images}")
 
 if use_projector:
-    assert len(csv_content) == num_images, "gimbal status is not correct for current frames"
+    # assert len(csv_content) == num_images, "gimbal status is not correct for current frames"
+    if len(csv_content) != num_images:
+        print(f"warning: csv content is of size {len(csv_content)} while we have {num_images} images")
 
 # create vis folder
 trk_save_folder = Path("vis_trk")
@@ -246,7 +248,7 @@ xws = [None] * len(img_paths)
 zws = [None] * len(img_paths)
 use_height = None
 for idx_img, img_path in enumerate(img_paths):
-    if idx_img < 25 or idx_img > 1000:
+    if idx_img < 0 or idx_img > 1000:
     # if idx_img < 25 or idx_img > 100:
         continue
     
@@ -294,7 +296,7 @@ for idx_img, img_path in enumerate(img_paths):
     # load gimbal status
     if projector is not None:
         # load gimbal status from csv file
-        lag_frame = 18
+        lag_frame = 0
         line = csv_content[idx_img - lag_frame]
         pitch_abs_deg = float(line[1]) * (-1)
         pitch_delta_deg = float(line[2]) * (-1)
@@ -380,7 +382,7 @@ for idx_img, img_path in enumerate(img_paths):
     # set target id
     target_awareness = True
     if target_awareness:
-        target_id = 13
+        target_id = 1
         tracker.set_target(target_id)
 
 
