@@ -219,6 +219,7 @@ class OCSort(object):
         trks = np.zeros((len(self.trackers), 5), dtype=np.float32)  # prediction locations, (#trks, 5), cx, cy, w, h, id
         trk_feats = np.zeros((len(self.trackers), self.feat_dim), dtype=np.float32)  # appearnces, (#trks, feat_dim), unnormalized
         v_directions = np.zeros((len(self.trackers), 2), dtype=np.float32)  # velocity directions, (#trks, 2), vx, vy, normalized or (0,0)
+        previous_obs_full = np.zeros((len(self.trackers), 4), dtype=np.float32)  # previous observations, (#trks, 4), cx, cy, w, h
         previous_obs = np.zeros((len(self.trackers), 2), dtype=np.float32)  # previous observations, (#trks, 2), cx, cy
         consecutive_missed_frames = np.zeros(len(self.trackers), dtype=np.int32)  # for dynamic buffer ratio, (#trks,)
         self.target_exist = False
@@ -245,7 +246,8 @@ class OCSort(object):
             v_directions[i] = self.trackers[i].v_direction  # (vx, vy)
 
             # previous observations
-            prev_z = self.trackers[i].get_previous_obs_for_v_direction()  # (cx, cy, s, r)
+            prev_z = self.trackers[i].get_previous_obs_for_v_direction()  # (cx, cy, w, h)
+            previous_obs_full[i] = prev_z.flatten()  # (cx, cy, w, h)
             previous_obs[i] = prev_z.flatten()[:2]  # (cx, cy)
 
             # consecutive_missed_frames
@@ -253,8 +255,16 @@ class OCSort(object):
 
         # project from world coordinate to pixel coordinate
         if projector is not None:
-            trks = projector.project_from_world_to_pixel(trks)
-
+            # project from world to pixel
+            pixel_trks, pixel_vels = projector.project_velocity_from_world_to_pixel(trks, v_directions)  
+            pixel_previous_obs_full = projector.project_from_world_to_pixel(previous_obs_full)
+            # velocity normalization
+            norms = np.sqrt(pixel_vels[:, [0]]**2 + pixel_vels[:, [1]]**2) + 1e-6
+            pixel_v_directions = pixel_vels / norms
+            # update
+            trks = pixel_trks
+            v_directions = pixel_v_directions
+            previous_obs = pixel_previous_obs_full[:, :2]
     
         # 1st round association(trackers vs high score detections)
         buffer_ratio = exp_saturate_by_age(

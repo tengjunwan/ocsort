@@ -153,6 +153,9 @@ class KalmanFilterBoxTrackerNoMatrix():
         if prev_z is None and self.last_observed_z is not None:
             prev_z = self.last_observed_z  # x, y, s, r
 
+        # convert from xysr to xywh
+        prev_z = self._cxcysr2cxcywh(prev_z)
+
         return prev_z
     
     def get_state_with_id(self):

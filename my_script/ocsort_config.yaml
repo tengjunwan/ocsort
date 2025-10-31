@@ -76,11 +76,10 @@ PROJECTOR:
   
 EXP:
   # img_foler: "imgs/screen-20250422-150828_seg_2"
-  img_foler: "test_gimbal_data/test_frames/0006_W_yuv"
+  img_foler: "test_gimbal_data/test_frames/0003_W"
   resize_ratio: 0.75
-  use_cmc: False
   use_efficient_strategy: True
   use_projector: True
-  gimbal_status_file: "test_gimbal_data/test_csv/0006_W.csv"
+  gimbal_status_file: "test_gimbal_data/test_csv/0003_W.csv"
 
 

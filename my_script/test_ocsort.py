@@ -235,7 +235,6 @@ tracker = OCSort(**config["OCSort"])
 
 np.set_printoptions(suppress=True, precision=3, linewidth=150)
 resize_ratio = config["EXP"]["resize_ratio"]
-use_cmc = config["EXP"]["use_cmc"]
 
 
 
@@ -253,7 +252,7 @@ for idx_img, img_path in enumerate(img_paths):
         continue
     
     img_id = int(img_path.stem)
-    if img_id == 83 or img_id == 84:
+    if img_id == 755 or img_id == 756:
         print("debug")
     print(f"=========processing {idx_img+1}/{num_images} img: {img_path}=========")
 
@@ -287,11 +286,8 @@ for idx_img, img_path in enumerate(img_paths):
             def_feats_mask[idx_detection] = True
 
     # CMC=camera motion compensation(local to gloabl)
-    if use_cmc:
-        _ = cmc.update(img, det_results)
-        global_det_results = cmc.local_to_global(det_results)
-    else:
-        global_det_results = det_results
+    curr_affine_matrix = cmc.update(img, det_results)
+    global_det_results = cmc.local_to_global(det_results)
 
     # load gimbal status
     if projector is not None:
@@ -306,7 +302,6 @@ for idx_img, img_path in enumerate(img_paths):
         raser_distance = float(line[8])
 
         # CMC
-        curr_affine_matrix = cmc.update(img, det_results)
         dx = curr_affine_matrix[0, 2]
         dy = curr_affine_matrix[1, 2]
 
@@ -325,14 +320,14 @@ for idx_img, img_path in enumerate(img_paths):
                 use_height = stable_height 
 
 
-        # set initial gimbal status
+        # setsset initial gimbal status
         if not projector.gimbal_status_is_initialized:
             projector.init_gimbal_status(theta=np.deg2rad(pitch_abs_deg + pitch_delta_deg), 
                                          phi=np.deg2rad(yaw_abs_deg + yaw_delta_deg), 
                                          zoom=zoom,
                                          height=use_height)
 
-        # =========method A: use dφ dθ calculated by Image=========
+        # =========use dφ dθ calculated by Image=========
         cal_yaw_delta_rad_between_2_consec_frames, cal_pitch_delta_rad_between_2_consec_frames = \
             projector.calculate_dphi_and_dtheta(dx, dy)  # radian
         cal_yaw_delta_deg_between_2_consec_frames, cal_pitch_delta_deg_between_2_consec_frames = \
@@ -361,13 +356,20 @@ for idx_img, img_path in enumerate(img_paths):
 
     # track
     debug_mode = True
+
     if debug_mode:
-        rtn_tracks, debug_info = tracker.update(global_det_results, det_feats, def_feats_mask, projector, debug_mode)
+        if projector is not None:
+            rtn_tracks, debug_info = tracker.update(det_results, det_feats, def_feats_mask, projector, debug_mode)
+        else:
+            rtn_tracks, debug_info = tracker.update(global_det_results, det_feats, def_feats_mask, None, debug_mode)
     else:
-        rtn_tracks = tracker.update(global_det_results, det_feats, def_feats_mask, projector, debug_mode)
+        if projector is not None:
+            rtn_tracks = tracker.update(det_results, det_feats, def_feats_mask, projector, debug_mode)
+        else:
+            rtn_tracks = tracker.update(global_det_results, det_feats, def_feats_mask, None, debug_mode)
 
     # correct trackers in 3d world due to sudden change of gimbal status
-    if gimbal_status_need_to_be_corrected:
+    if projector is not None and gimbal_status_need_to_be_corrected:
         cal_yaw_delta_deg = yaw_delta_deg
         cal_pitch_delta_deg = pitch_delta_deg
         use_height = stable_height
@@ -382,40 +384,23 @@ for idx_img, img_path in enumerate(img_paths):
     # set target id
     target_awareness = True
     if target_awareness:
-        target_id = 1
+        target_id = 13
         tracker.set_target(target_id)
 
 
-    # camera motion compensation(global to local)
-    if use_cmc:
-        # load tracks coordinate(global)
-        global_trks = np.zeros((len(rtn_tracks), 4), dtype=np.float32)
-        global_trks_velocities = np.zeros((len(rtn_tracks), 2), dtype=np.float32)
-        for i, trk in enumerate(rtn_tracks):
-            global_trks[i] = [trk.cx, trk.cy, trk.w, trk.h]
-            global_trks_velocities[i] = [trk.vx, trk.vy]
-
-        # convert from global to local
-        local_trks = cmc.global_to_local(global_trks)
-        for i, trk in enumerate(rtn_tracks):
-            trk.cx, trk.cy, trk.w, trk.h = local_trks[i]
-
-        # convert velocity direction from global to local for display 
-        local_trks_velocities = cmc.global_to_local_for_velocity(global_trks_velocities)
-        for i, trk in enumerate(rtn_tracks):
-            trk.vx, trk.vy = local_trks_velocities[i]
-
+    
+    if projector is None:  # only cmc used 
+       pass
 
     # =================================visualization=================================
     # draw tracker result
     img_vis_trk = img.copy()
 
-    # draw camera motion info 
-    if use_cmc:
-        img_vis_trk = cmc.draw_camera_info(img_vis_trk)
-
-    # draw gimbal status info
-    if use_projector:
+    
+    if projector is None:  # draw camera motion info 
+        cmc_info = cmc.get_camera_info()
+        draw_info(img_vis_trk, cmc_info)
+    else:  # draw gimbal status info
         gimbal_info = {
             "pitch(deg)": pitch_abs_deg+cal_pitch_delta_deg, 
             "yaw(deg)": yaw_abs_deg+cal_yaw_delta_deg,
@@ -452,9 +437,26 @@ for idx_img, img_path in enumerate(img_paths):
             if int(trk.id) == target_id:
                 xws[idx_img] = trk.cx
                 zws[idx_img] = trk.cy
-            trk_cx, trk_cy, trk_w, trk_h = projector.project_from_world_to_pixel(np.array([trk.cx, trk.cy, trk.w, trk.h]))
+            # projector: from world to pixel
+            pixel_location, pixel_velocity = projector.project_velocity_from_world_to_pixel(np.array([trk.cx, trk.cy, trk.w, trk.h]),
+                                                                            np.array([trk.vx, trk.vy]))  # only need its direction
+            trk_cx, trk_cy, trk_w, trk_h = pixel_location
+            trk_vx, trk_vy = pixel_velocity
+            scale = 200 * (trk.vx**2 + trk.vy**2)**0.5/ ((trk_vx**2 + trk_vy**2)**0.5 + 1e-16)  # proportional to real speed in 3d world
         else:
-            trk_cx, trk_cy, trk_w, trk_h = trk.cx, trk.cy, trk.w, trk.h
+            # camera motion compensation(global to local)
+             # load tracks coordinate(global)
+            global_trk = np.array([trk.cx, trk.cy, trk.w, trk.h])
+            global_vel = np.array([trk.vx, trk.vy])
+            # convert from global to local
+            local_trk = cmc.global_to_local(global_trk.reshape(1, -1)).flatten()
+            trk_cx, trk_cy, trk_w, trk_h = local_trk
+            # convert velocity direction from global to local for display 
+            local_vel = cmc.global_to_local_for_velocity(global_vel.reshape(1, -1)).flatten()
+            trk_vx, trk_vy = local_vel
+            scale = 10
+
+        # draw locations
         x1 = int(trk_cx - 0.5 * trk_w)
         y1 = int(trk_cy - 0.5 * trk_h)
         x2 = int(trk_cx + 0.5 * trk_w)
@@ -468,14 +470,6 @@ for idx_img, img_path in enumerate(img_paths):
                     0.5, color, 2)
         
         # draw velocity
-        if projector is not None:
-            pixel_location, pixel_velocity = projector.project_velocity_from_world_to_pixel(np.array([trk.cx, trk.cy, trk.w, trk.h]),
-                                                                            np.array([trk.vx, trk.vy]))  # only need its direction
-            trk_vx, trk_vy = pixel_velocity
-            scale = 200 * (trk.vx**2 + trk.vy**2)**0.5/ ((trk_vx**2 + trk_vy**2)**0.5 + 1e-16)  # proportional to real speed in 3d world
-        else:
-            trk_vx, trk_vy = trk.vx, trk.vy
-            scale = 10
         cx = int(trk_cx)
         cy = int(trk_cy)
         end_x = int(trk_cx + scale * trk_vx)
@@ -486,11 +480,12 @@ for idx_img, img_path in enumerate(img_paths):
         # Calculate the velocity magnitude
         if projector is not None:
             magnitude = (trk.vx**2 + trk.vy**2)**0.5  # unit: m/frame
-            magnitude = magnitude * 25 * 3.6  # unit: km/h, fps=25
+            fps = 20
+            magnitude = magnitude * fps * 3.6  # unit: km/h, 
             magnitude_label = f"{magnitude:.2f} km/h"
         else:
             magnitude = (trk.vx**2 + trk.vy**2)**0.5
-            magnitude_label = f"{magnitude:.2f}"
+            magnitude_label = f"{magnitude:.2f} p/f"
 
         text_x = cx
         text_y = cy + 15  # shift downward; adjust value as needed
