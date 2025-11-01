@@ -76,7 +76,7 @@ PROJECTOR:
   
 EXP:
   # img_foler: "imgs/screen-20250422-150828_seg_2"
-  img_foler: "test_gimbal_data/test_frames/0003_W"
+  img_foler: "test_gimbal_data/test_frames/0003_W_yuv"
   resize_ratio: 0.75
   use_efficient_strategy: True
   use_projector: True

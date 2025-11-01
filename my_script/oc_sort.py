@@ -261,10 +261,13 @@ class OCSort(object):
             # velocity normalization
             norms = np.sqrt(pixel_vels[:, [0]]**2 + pixel_vels[:, [1]]**2) + 1e-6
             pixel_v_directions = pixel_vels / norms
+            # target 
+            pixel_target_location = projector.project_from_world_to_pixel(self.target_location)
             # update
             trks = pixel_trks
             v_directions = pixel_v_directions
             previous_obs = pixel_previous_obs_full[:, :2]
+            self.target_location = pixel_target_location
     
         # 1st round association(trackers vs high score detections)
         buffer_ratio = exp_saturate_by_age(
